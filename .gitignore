@@ -16,6 +16,11 @@ dist-ssr
 .nitro
 *.local
 
+# Environment (Werte in Vercel/Lovable hinterlegen, nie committen)
+.env
+.env.*
+!.env.example
+
 # Wrangler / Cloudflare
 .wrangler/
 .dev.vars
