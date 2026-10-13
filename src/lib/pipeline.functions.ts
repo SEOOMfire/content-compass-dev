@@ -204,7 +204,12 @@ export const runFromStepFn = createServerFn({ method: "POST" })
         // erschöpft → Ergebnis zurückgeben. Sonst kurz warten und erneut versuchen.
         // Fehlendes OpenAI-Guthaben ist nicht transient → nicht wiederholen.
         const fatal = !res.ok && /Guthaben aufgebraucht|OPENAI_API_KEY fehlt/.test(res.error ?? "");
-        if (res.ok || (res as { blocked?: boolean }).blocked || fatal || attempts > MAX_STEP_RETRIES) {
+        if (
+          res.ok ||
+          (res as { blocked?: boolean }).blocked ||
+          fatal ||
+          attempts > MAX_STEP_RETRIES
+        ) {
           return { ...res, attempts };
         }
         await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
@@ -283,10 +288,29 @@ export const savePrompt = createServerFn({ method: "POST" })
     return { version };
   });
 
+/**
+ * Testlauf eines Prompts. Mit `draft` wird der ungespeicherte Entwurf getestet
+ * (gespeicherte Vorlage bleibt unverändert), sonst die gespeicherte Version.
+ */
 export const testPrompt = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) =>
-    z.object({ stepKey: z.string(), vars: z.record(z.string(), z.string()) }).parse(d),
+    z
+      .object({
+        stepKey: z.string(),
+        vars: z.record(z.string(), z.string()),
+        draft: z
+          .object({
+            system_prompt: z.string(),
+            user_prompt: z.string(),
+            model: z.string(),
+            temperature: z.number(),
+            max_tokens: z.number(),
+            reasoning_effort: z.string().nullable().optional(),
+          })
+          .optional(),
+      })
+      .parse(d),
   )
   .handler(async ({ data, context }) => {
     await assertAdmin(context.userId);
@@ -298,8 +322,93 @@ export const testPrompt = createServerFn({ method: "POST" })
       .eq("step_key", data.stepKey)
       .single();
     if (error || !tpl) throw new Error("Prompt nicht gefunden.");
-    const res = await runPrompt(tpl as never, data.vars);
-    return { raw: res.raw, model: res.model };
+    const effective = data.draft
+      ? { ...tpl, ...data.draft, reasoning_effort: data.draft.reasoning_effort ?? null }
+      : tpl;
+    // Rohtext zurückgeben, auch wenn das JSON ungültig ist (Prüfung zeigt die UI an).
+    const res = await runPrompt(
+      { ...(effective as Record<string, unknown>), response_format: "text" } as never,
+      data.vars,
+    );
+    return {
+      raw: res.raw,
+      model: res.model,
+      tokensIn: res.tokensIn,
+      tokensOut: res.tokensOut,
+      responseFormat: (tpl.response_format as string | null) ?? "text",
+    };
+  });
+
+/**
+ * Aufgezeichnete Platzhalterwerte der letzten Jobläufe für ein Prompt-Template,
+ * damit Testläufe mit echten Daten befüllt werden können.
+ */
+export const listPromptSamples = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) => z.object({ templateKey: z.string() }).parse(d))
+  .handler(async ({ data, context }) => {
+    await assertAdmin(context.userId);
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { PIPELINE } = await import("@/lib/pipeline/types");
+    const step = PIPELINE.find((s) => s.promptKey === data.templateKey);
+    if (!step) return [];
+
+    const { data: steps, error } = await supabaseAdmin
+      .from("job_steps")
+      .select("job_id,updated_at,prompt_vars")
+      .eq("step_key", step.key)
+      .not("prompt_vars", "is", null)
+      .order("updated_at", { ascending: false })
+      .limit(5);
+    if (error) throw new Error(error.message);
+    const rows = (steps ?? []) as { job_id: string; updated_at: string; prompt_vars: unknown }[];
+    if (!rows.length) return [];
+
+    const { data: jobs } = await supabaseAdmin
+      .from("jobs")
+      .select("id,source_url,markets(country,language)")
+      .in(
+        "id",
+        rows.map((r) => r.job_id),
+      );
+    type JobRow = {
+      id: string;
+      source_url: string;
+      markets: { country?: string; language?: string } | null;
+    };
+    const jobById = new Map(((jobs ?? []) as unknown as JobRow[]).map((j) => [j.id, j]));
+
+    const samples: { id: string; label: string; vars: Record<string, string> }[] = [];
+    for (const row of rows) {
+      const calls = (Array.isArray(row.prompt_vars) ? row.prompt_vars : []) as {
+        step_key?: string;
+        vars?: Record<string, unknown>;
+      }[];
+      const relevant = calls.filter((c) => c.step_key === data.templateKey && c.vars);
+      const job = jobById.get(row.job_id);
+      const path = job
+        ? (new URL(job.source_url).pathname.split("/").filter(Boolean).pop() ?? job.source_url)
+        : row.job_id;
+      const market = job?.markets
+        ? `${job.markets.country ?? "?"}/${job.markets.language ?? "?"}`
+        : "?";
+      relevant.forEach((call, i) => {
+        samples.push({
+          id: `${row.job_id}:${i}`,
+          label: `${path} · ${market} · ${row.updated_at.slice(0, 10)}${
+            relevant.length > 1 ? ` · Aufruf ${i + 1}/${relevant.length}` : ""
+          }`,
+          // Gleiche Darstellung wie renderTemplate: Strings unverändert, sonst JSON.
+          vars: Object.fromEntries(
+            Object.entries(call.vars ?? {}).map(([k, v]) => [
+              k,
+              v == null ? "" : typeof v === "string" ? v : JSON.stringify(v, null, 2),
+            ]),
+          ),
+        });
+      });
+    }
+    return samples;
   });
 
 /** Arbeitsbereiche des Nutzers (oder alle, wenn admin) mit Rollen + Mitgliederzahl. */
@@ -444,7 +553,9 @@ export const inviteUser = createServerFn({ method: "POST" })
         options: { redirectTo: data.redirectTo },
       });
       if (gen.error || !gen.data?.user) {
-        throw new Error(gen.error?.message ?? invited.error?.message ?? "Einladung fehlgeschlagen.");
+        throw new Error(
+          gen.error?.message ?? invited.error?.message ?? "Einladung fehlgeschlagen.",
+        );
       }
       userId = gen.data.user.id;
       link = gen.data.properties?.action_link ?? null;
