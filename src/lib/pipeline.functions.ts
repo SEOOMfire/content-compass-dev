@@ -152,7 +152,7 @@ export const exportFullJobDocs = createServerFn({ method: "POST" })
     return await buildFullJobDocumentation(data.jobId);
   });
 
-/** Lokalisierter Endtext (S13) für Vorschau + .md-Download in der Liste. */
+/** Lokalisierter Endtext (Export aus Schritt 4) für Vorschau + .md-Download in der Liste. */
 export const getJobContent = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => z.object({ jobId: z.string().uuid() }).parse(d))
@@ -202,7 +202,9 @@ export const runFromStepFn = createServerFn({ method: "POST" })
         const res = await executeStep(data.jobId, stepKey);
         // Erfolg, blockierter Schritt (fehlende Voraussetzung) oder Retry-Budget
         // erschöpft → Ergebnis zurückgeben. Sonst kurz warten und erneut versuchen.
-        if (res.ok || (res as { blocked?: boolean }).blocked || attempts > MAX_STEP_RETRIES) {
+        // Fehlendes OpenAI-Guthaben ist nicht transient → nicht wiederholen.
+        const fatal = !res.ok && /Guthaben aufgebraucht|OPENAI_API_KEY fehlt/.test(res.error ?? "");
+        if (res.ok || (res as { blocked?: boolean }).blocked || fatal || attempts > MAX_STEP_RETRIES) {
           return { ...res, attempts };
         }
         await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
@@ -221,55 +223,6 @@ export const runFromStepFn = createServerFn({ method: "POST" })
       if (!res.ok) break;
     }
     return results;
-  });
-
-/**
- * Admin-Diagnose: Link-Pool für Markt + Beispiel-URL aufbauen (max. 8 Abrufe).
- * Ersetzt den früheren Gesamtindex-Lauf.
- */
-export const previewLinkPool = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((d: unknown) =>
-    z.object({ marketId: z.string().uuid(), sourceUrl: z.string().url() }).parse(d),
-  )
-  .handler(async ({ data, context }) => {
-    await assertAdmin(context.userId);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { buildLinkPool } = await import("@/lib/pipeline/hub.server");
-    const { data: market, error } = await supabaseAdmin
-      .from("markets")
-      .select("*")
-      .eq("id", data.marketId)
-      .single();
-    if (error || !market) throw new Error("Markt nicht gefunden.");
-
-    const pool = await buildLinkPool(market as never, data.sourceUrl);
-    for (const e of pool.entries) {
-      await supabaseAdmin.from("link_pool").upsert(
-        {
-          market_id: data.marketId,
-          content_type: "magazine",
-          source_page: e.source_page,
-          url: e.url,
-          anchor_text: e.anchor_text,
-          path_type: e.path_type,
-          origin: e.origin,
-          http_status: 200,
-          fetched_at: new Date().toISOString(),
-        } as never,
-        { onConflict: "market_id,content_type,url" },
-      );
-    }
-    await supabaseAdmin
-      .from("markets")
-      .update({ index_last_run: new Date().toISOString() })
-      .eq("id", data.marketId);
-    return {
-      hub_url: pool.hub_url,
-      fetches: pool.fetches,
-      entries: pool.entries.length,
-      siblings: pool.siblings.map((s) => s.url),
-    };
   });
 
 export const savePrompt = createServerFn({ method: "POST" })
@@ -573,27 +526,4 @@ export const updateWorkspaceMember = createServerFn({ method: "POST" })
       );
     }
     return { ok: true };
-  });
-
-/** Pfadverzeichnis eines Markts aus den Sitemaps (DE ↔ Zielland) aufbauen. */
-export const importMarketPaths = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((d: unknown) => z.object({ marketId: z.string().uuid() }).parse(d))
-  .handler(async ({ data, context }) => {
-    await assertAdmin(context.userId);
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data: market, error } = await supabaseAdmin
-      .from("markets")
-      .select("id,domain,locale")
-      .eq("id", data.marketId)
-      .single();
-    if (error || !market) throw new Error("Markt nicht gefunden.");
-    const { importPathsFromSitemaps } = await import("@/lib/pipeline/market-paths.server");
-    const res = await importPathsFromSitemaps(market);
-    return {
-      saved: res.saved,
-      pairs: Object.keys(res.pairs).length,
-      sitemaps: res.sitemaps.length,
-      log: res.sitemaps.map((s) => `${s.url} → HTTP ${s.status}, ${s.urls} Einträge, ${s.pairs} Paare`),
-    };
   });

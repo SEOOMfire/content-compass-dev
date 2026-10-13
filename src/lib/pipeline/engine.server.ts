@@ -2,69 +2,29 @@ import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import {
   PIPELINE,
   STEP_BY_KEY,
+  STEP_CONTEXT_KEYS,
+  type Block,
   type JobContext,
-  type PlanSection,
-  type TargetStatus,
+  type StepKey,
 } from "./types";
-import { extractPage, verifyAndExtract, verifyUrl } from "./extract.server";
+import { extractSource } from "./extract.server";
 import {
   runPrompt,
   startVarRecording,
   collectRecordedVars,
   type PromptTemplateRow,
 } from "./ai.server";
-import {
-  isUsable,
-  matchHubEntry,
-  retrieveFromPool,
-  MIN_POOL_SCORE,
-  type PoolEntry,
-  type SearchLogEntry,
-} from "./pool";
-import {
-  buildLinkPool,
-  fetchHubEntries,
-  siteSearch,
-  SEARCH_BUDGET,
-  POOL_TTL_MS,
-  type HubMarket,
-} from "./hub.server";
-import {
-  S2OutputSchema,
-  S6OutputSchema,
-  S8OutputSchema,
-  S10OutputSchema,
-  S12OutputSchema,
-  validateStepData,
-} from "./schemas";
-import {
-  buildTargetUrls,
-  hreflangHint,
-  lastPathSegment,
-  matchHreflang,
-  missingSegments,
-  prefixSegments,
-  PathMapError,
-} from "./paths";
-import { loadMarketPathMap, saveMarketPaths } from "./market-paths.server";
-import { harvestHreflangEquivalents } from "./hreflang.server";
-import { buildArticleTopic, categorySegmentOfUrl, getCategorySegments, translateSegment } from "./topic";
-import { checkExactTables, checkLocalizedTable, stripMarkdownTables } from "./tables";
-import {
-  blockingIssues,
-  checkGeneratedSection,
-  countListItems,
-  countParagraphs,
-  countWords,
-  deterministicArticleIssues,
-  isTableOnlySection,
-  issueSeverity,
-  normalizeForComparison,
-  MAX_SECTION_WORD_RATIO,
-} from "./content-guards";
-
-import { buildSectionInputs } from "./plan";
 import { dependencyBlocker } from "./deps";
+import { marketPromptProfile, toMarketProfile, type MarketProfile } from "./market";
+import { normalizeFindings } from "./scan";
+import {
+  blocksForPrompt,
+  LocalizeError,
+  localizeDocument,
+  outlineOf,
+  type PromptCall,
+} from "./localize";
+import { reviewDocument } from "./review";
 
 export { dependencyBlocker };
 
@@ -76,13 +36,11 @@ type MarketRow = Record<string, unknown> & {
   domain: string;
   brand: string | null;
   language_variant: string | null;
-  magazine_root: string | null;
-  category_root: string | null;
   address_form: string | null;
   closing_note: string | null;
   forbidden_claims: unknown;
   institutions: unknown;
-  path_map: unknown;
+  localization_notes?: string | null;
 };
 
 async function loadTemplate(stepKey: string): Promise<PromptTemplateRow> {
@@ -95,13 +53,18 @@ async function loadTemplate(stepKey: string): Promise<PromptTemplateRow> {
   return data as unknown as PromptTemplateRow;
 }
 
-function slugify(s: string): string {
-  return s
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
+/** LLM-Aufruf eines Templates als injizierbare Funktion (testbar über Mocks). */
+function promptCall(tpl: PromptTemplateRow): PromptCall {
+  return async (vars) => {
+    const res = await runPrompt<unknown>(tpl, vars);
+    return {
+      data: res.data,
+      model: res.model,
+      promptSnapshot: res.promptSnapshot,
+      tokensIn: res.tokensIn,
+      tokensOut: res.tokensOut,
+    };
+  };
 }
 
 export interface StepRunResult {
@@ -113,1808 +76,165 @@ export interface StepRunResult {
   tokensOut?: number;
 }
 
+/** Schrittfehler mit auswertbarer Ausgabe (z. B. Liste fehlerhafter Block-IDs). */
 class PipelineQualityError extends Error {
   constructor(
     message: string,
     readonly output: unknown,
-    readonly context: Partial<JobContext>,
+    readonly stats: {
+      model?: string;
+      promptSnapshot?: string;
+      tokensIn?: number;
+      tokensOut?: number;
+    } = {},
   ) {
     super(message);
   }
 }
 
-function chunked<T>(arr: T[], size: number): T[][] {
-  const out: T[][] = [];
-  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
-  return out;
-}
-
-function countBy(values: string[]): Record<string, number> {
-  return values.reduce<Record<string, number>>((acc, v) => {
-    acc[v] = (acc[v] ?? 0) + 1;
+function countTypes(blocks: Block[]): Record<string, number> {
+  return blocks.reduce<Record<string, number>>((acc, b) => {
+    const key = b.type === "heading" ? `h${b.level}` : b.type;
+    acc[key] = (acc[key] ?? 0) + 1;
     return acc;
   }, {});
 }
 
-/** Gehört eine URL zum redaktionellen Magazinbereich des Markts? */
-function isMagazineUrl(url: string, market: MarketRow): boolean {
-  const root = (market.magazine_root ?? "").trim();
-  try {
-    const path = new URL(url).pathname;
-    if (root) {
-      const rootPath = root.startsWith("http") ? new URL(root).pathname : root;
-      if (rootPath && path.startsWith(rootPath)) return true;
-    }
-    return /\/(magazyn|magazin|magazine|ratgeber|blog|poradnik|guide|conseils)\//.test(path);
-  } catch {
-    return false;
-  }
-}
-
-function hubMarket(market: MarketRow): HubMarket {
-  return {
-    id: market.id,
-    domain: market.domain,
-    locale: market.locale,
-    language: market.language,
-    path_map: market.path_map,
-    magazine_root: market.magazine_root,
-    category_root: market.category_root,
-    path_prefix: (market["path_prefix"] as string | null) ?? null,
-    crawl_delay_ms: (market["crawl_delay_ms"] as number | null) ?? null,
-    search_url_pattern: (market["search_url_pattern"] as string | null) ?? null,
-  };
-}
-
-/**
- * Fehlende Pfadsegmente auflösen: die KI schlägt Übersetzungen vor, jede
- * Kombination wird als Verzeichnis-Adresse live geprüft und nur bestätigte
- * Segmente werden dauerhaft im Pfadverzeichnis gespeichert.
- */
-async function resolveMissingSegments(
-  market: MarketRow,
-  sourceUrl: string,
-  known: Record<string, string>,
-): Promise<{ map: Record<string, string>; log: string[] }> {
-  const missing = missingSegments(sourceUrl, market as never, known);
-  const log: string[] = [];
-  if (!missing.length) return { map: {}, log };
-
-  let proposals: Record<string, string[]> = {};
-  try {
-    const tpl = await loadTemplate("translate_path_segment");
-    const res = await runPrompt<unknown>(tpl, {
-      segments: missing,
-      language: market.language,
-      country: market.country,
-      domain: market.domain,
-      known_pairs: known,
-      source_url: sourceUrl,
-    });
-    const data = res.data as { segments?: { de: string; candidates?: string[] }[] } | undefined;
-    for (const item of data?.segments ?? []) {
-      if (typeof item?.de === "string" && Array.isArray(item.candidates)) {
-        proposals[item.de.toLowerCase()] = item.candidates
-          .filter((c): c is string => typeof c === "string" && Boolean(c.trim()))
-          .slice(0, 3);
-      }
-    }
-  } catch (e) {
-    log.push(`Segmentvorschlag nicht möglich: ${(e as Error).message}`);
-    proposals = {};
-  }
-  if (!Object.keys(proposals).length) return { map: {}, log };
-
-  const base = /^https?:\/\//i.test(market.domain) ? market.domain.replace(/\/+$/, "") : `https://${market.domain}`;
-  const segs = sourceUrl.replace(/^https?:\/\/[^/]+/, "").split("/").filter(Boolean).slice(0, -1);
-  const pre = prefixSegments(market as never);
-
-  // Kombinationen begrenzen (max. 9 Prüfungen).
-  const combos: Record<string, string>[] = [{}];
-  for (const seg of missing) {
-    const cands = proposals[seg] ?? [];
-    if (!cands.length) return { map: {}, log: [...log, `Keine Vorschläge für „${seg}".`] };
-    const next: Record<string, string>[] = [];
-    for (const c of combos) for (const cand of cands) next.push({ ...c, [seg]: cand });
-    combos.splice(0, combos.length, ...next.slice(0, 9));
-  }
-
-  for (const combo of combos) {
-    const map = { ...known, ...combo };
-    const translated = segs.map((x) => map[x.toLowerCase()] ?? null);
-    if (translated.some((t) => t === null)) continue;
-    const url = `${base}/${[...pre, ...(translated as string[])].join("/")}/`;
-    const v = await verifyUrl(url);
-    log.push(`Segmentprüfung ${url} → HTTP ${v.http_status}`);
-    if (v.ok) {
-      await saveMarketPaths(
-        market.id,
-        Object.entries(combo).map(([de_segment, target_segment]) => ({
-          de_segment,
-          target_segment,
-          origin: "verified" as const,
-          sample_url: url,
-          http_status: v.http_status,
-        })),
-      );
-      return { map: combo, log };
-    }
-  }
-  return { map: {}, log };
+function requireSource(ctx: JobContext) {
+  if (!ctx.source?.blocks?.length)
+    throw new Error("Schritt 1 (Quelle extrahieren) muss zuerst laufen.");
+  return ctx.source;
 }
 
 export async function runStep(
   stepKey: string,
   job: { id: string; source_url: string; context: JobContext },
-  market: MarketRow,
+  market: MarketProfile,
 ): Promise<StepRunResult> {
   const ctx = job.context ?? {};
 
   switch (stepKey) {
-    case "S1_extract_source": {
-      const doc = await extractPage(job.source_url);
-      if (doc.httpStatus !== 200) throw new Error(`Quelle antwortete mit HTTP ${doc.httpStatus}.`);
+    case "extract": {
+      const doc = await extractSource(job.source_url);
+      if (doc.httpStatus !== 200) {
+        throw new Error(
+          doc.httpStatus === 0
+            ? "Quelle nicht erreichbar (Netzwerkfehler oder ungültige URL)."
+            : `Quelle antwortete mit HTTP ${doc.httpStatus}.`,
+        );
+      }
+      if (!doc.blocks.length) {
+        throw new Error("Auf der Quellseite wurde kein Inhalt gefunden (0 Blöcke).");
+      }
       return {
         output: {
-          ...doc,
-          sections: doc.sections.length,
-          hreflang_count: doc.hreflang.length,
-          content_links: doc.contentLinks?.length ?? 0,
+          url: doc.url,
+          finalUrl: doc.finalUrl,
+          httpStatus: doc.httpStatus,
+          title: doc.title,
+          metaDescription: doc.metaDescription,
+          block_count: doc.blocks.length,
+          word_count: doc.wordCount,
+          types: countTypes(doc.blocks),
+          blocks: doc.blocks,
         },
         context: { source: doc },
       };
     }
 
-    case "S2_resolve_slug": {
+    case "scan": {
       const source = requireSource(ctx);
-      // Stufe 1: hreflang (P1-4)
-      const alt = matchHreflang(source.hreflang, market.locale);
-      if (alt) {
-        const seg = lastPathSegment(alt.href) || slugify(source.h1 ?? "");
-        const { topic } = buildArticleTopic({
-          source,
-          sourceUrl: job.source_url,
-          slug: { term_translated: seg },
+      const tpl = await loadTemplate("localization_scan");
+      const res = await runPrompt<unknown>(tpl, {
+        country: market.country,
+        language: market.language,
+        language_variant: market.language_variant,
+        brand: market.brand,
+        address_form: market.address_form ?? "",
+        market_profile: marketPromptProfile(market),
+        institutions: market.institutions,
+        forbidden_claims: market.forbidden_claims,
+        localization_notes: market.localization_notes ?? "",
+        source_title: source.title ?? "",
+        source_meta_description: source.metaDescription ?? "",
+        blocks: blocksForPrompt(source.blocks),
+      });
+      const result = normalizeFindings(res.data, source.blocks, market);
+      return {
+        output: result,
+        context: { findings: result.findings },
+        model: res.model,
+        promptSnapshot: res.promptSnapshot,
+        tokensIn: res.tokensIn,
+        tokensOut: res.tokensOut,
+      };
+    }
+
+    case "localize": {
+      const source = requireSource(ctx);
+      const tpl = await loadTemplate("localize_document");
+      try {
+        const res = await localizeDocument({
+          blocks: source.blocks,
+          findings: ctx.findings ?? [],
           market,
-          combinedMap: {},
+          sourceMeta: { title: source.title, metaDescription: source.metaDescription },
+          call: promptCall(tpl),
         });
         return {
           output: {
-            resolution_method: "hreflang",
-            hreflang: alt,
-            term_translated: seg,
-            slug_candidates: [seg],
-            skipped_llm: true,
+            meta: res.localized.meta,
+            chunks: res.chunks,
+            calls: res.stats.calls,
+            blocks: res.localized.blocks.length,
+            removed: res.localized.blocks.filter((b) => b.removed).map((b) => b.id),
+            retried: res.retried,
           },
-          context: {
-            slug: { term_translated: seg, slug_candidates: [seg] },
-            hreflangTargetUrl: alt.href,
-            articleTopic: topic,
-          },
+          context: { localized: res.localized },
+          ...(res.stats.model ? { model: res.stats.model } : {}),
+          ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
+          tokensIn: res.stats.tokensIn,
+          tokensOut: res.stats.tokensOut,
         };
-      }
-
-      // Stufe 2: Slug-Kandidaten über das URL-Segment (P1-2)
-      const term = lastPathSegment(job.source_url) || source.h1 || job.source_url;
-      const tpl = await loadTemplate("resolve_target_slug");
-      const res = await runPrompt<unknown>(tpl, {
-        term,
-        h1: source.h1 ?? "",
-        title: source.title ?? "",
-        language: market.language,
-        country: market.country,
-      });
-      const parsed = validateStepData("S2_resolve_slug", S2OutputSchema, res.data);
-      const candidates = [...new Set(parsed.slug_candidates.map(slugify).filter(Boolean))];
-      if (!candidates.length) throw new Error("S2 lieferte keine verwertbaren Slug-Kandidaten.");
-      const { topic } = buildArticleTopic({
-        source,
-        sourceUrl: job.source_url,
-        slug: { term_translated: parsed.term_translated },
-        market,
-        combinedMap: {},
-      });
-      return {
-        output: { ...parsed, slug_candidates: candidates, resolution_method: "slug", term },
-        context: {
-          slug: { term_translated: parsed.term_translated, slug_candidates: candidates },
-          hreflangTargetUrl: null,
-          articleTopic: topic,
-        },
-        model: res.model,
-        promptSnapshot: res.promptSnapshot,
-        tokensIn: res.tokensIn,
-        tokensOut: res.tokensOut,
-      };
-    }
-
-    case "S3_target_status": {
-      const source = requireSource(ctx);
-      const slug = ctx.slug;
-      if (!slug) throw new Error("Schritt S2 muss zuerst laufen.");
-      const hint = hreflangHint(source.hreflang, market.locale);
-      const learnedMap = await loadMarketPathMap(market.id);
-      const evidence: { step: string; detail: string }[] = [];
-      const checked: { url: string; status: number }[] = [];
-      let found: string | null = null;
-      let method: "hreflang" | "hub" | "slug" = "slug";
-
-      // Stufe 1 · hreflang-Alternate
-      if (ctx.hreflangTargetUrl) {
-        method = "hreflang";
-        evidence.push({ step: "hreflang", detail: `Alternate der Quellseite: ${ctx.hreflangTargetUrl}` });
-        const v = await verifyUrl(ctx.hreflangTargetUrl);
-        checked.push({ url: ctx.hreflangTargetUrl, status: v.http_status });
-        if (v.ok) found = ctx.hreflangTargetUrl;
-      } else if (hint) {
-        evidence.push({ step: "hreflang", detail: hint });
-      }
-
-      // Stufe 2 · Treffer in der Hub-Liste des Zielmarkts (ersetzt den Gesamtindex)
-      let hubEntries: PoolEntry[] = ctx.linkPool?.entries ?? [];
-      let hubUrl = ctx.linkPool?.hub_url ?? null;
-      if (!found && !hubEntries.length) {
-        const hub = await fetchHubEntries(
-          hubMarket(market),
-          job.source_url,
-          { ...learnedMap, ...(ctx.derivedPathMap ?? {}) },
-        );
-        hubEntries = hub.entries;
-        hubUrl = hub.hub_url;
-        evidence.push({
-          step: "hub",
-          detail: hub.hub_url
-            ? `Hub-Seite ${hub.hub_url} geladen (${hub.entries.length} Links).`
-            : "Keine Hub-Seite erreichbar.",
-        });
-      }
-      if (!found && hubEntries.length) {
-        const match = matchHubEntry(hubEntries, slug.term_translated, slug.slug_candidates);
-        if (match) {
-          evidence.push({
-            step: "hub",
-            detail: `Hub-Treffer „${match.entry.anchor_text ?? match.entry.url}" (Ähnlichkeit ${match.score.toFixed(2)}).`,
-          });
-          const v = await verifyUrl(match.entry.url);
-          checked.push({ url: match.entry.url, status: v.http_status });
-          if (v.ok) {
-            found = match.entry.url;
-            method = "hub";
-          }
-        } else if (hubUrl) {
-          evidence.push({
-            step: "hub",
-            detail: `Kein passender Eintrag in der Hub-Liste (${hubEntries.length} Links geprüft).`,
-          });
-        }
-      }
-
-      // Stufe 2b · hreflang-Ernte über die Content-Links der Quellseite.
-      // Liefert belegte Ziel-URLs und eine abgeleitete Pfadübersetzung, wenn
-      // market.path_map Lücken hat (z. B. „gesundheit" → „health").
-      let harvest = ctx.hreflangHarvest ?? null;
-      let derivedMap = { ...learnedMap, ...(ctx.derivedPathMap ?? {}) };
-      if (!found) {
-        if (!harvest) {
-          const res = await harvestHreflangEquivalents(source.contentLinks ?? [], hubMarket(market));
-          harvest = {
-            checked: res.checked,
-            entries: res.entries,
-            discovered: res.discovered,
-            derived_path_map: res.derivedPathMap,
-            harvested_at: new Date().toISOString(),
-          };
-        }
-        derivedMap = { ...harvest.derived_path_map, ...derivedMap };
-        if (Object.keys(harvest.derived_path_map).length) {
-          await saveMarketPaths(
-            market.id,
-            Object.entries(harvest.derived_path_map).map(([de_segment, target_segment]) => ({
-              de_segment,
-              target_segment,
-              origin: "hreflang" as const,
-            })),
-          );
-        }
-        evidence.push({
-          step: "hreflang_pool",
-          detail:
-            `${harvest.checked.length} im Content verlinkte Nachbarseiten abgerufen, ` +
-            `${harvest.entries.length} hreflang-Äquivalente im Zielmarkt gefunden, ` +
-            `${harvest.discovered?.length ?? 0} weitere Quellkandidaten (nicht abgerufen) erfasst` +
-            (Object.keys(harvest.derived_path_map).length
-              ? `; abgeleitete Pfade: ${Object.entries(harvest.derived_path_map)
-                  .map(([k, v]) => `${k}→${v}`)
-                  .join(", ")}`
-              : "; keine Pfadübersetzung ableitbar"),
-        });
-        const poolMatch = matchHubEntry(
-          harvest.entries.map((e) => ({ ...e, origin: "hub" as const })),
-          slug.term_translated,
-          slug.slug_candidates,
-        );
-        if (poolMatch) {
-          const v = await verifyUrl(poolMatch.entry.url);
-          checked.push({ url: poolMatch.entry.url, status: v.http_status });
-          evidence.push({
-            step: "hreflang_pool",
-            detail: `Kandidat aus hreflang-Ernte: ${poolMatch.entry.url} → HTTP ${v.http_status}`,
-          });
-          if (v.ok) {
-            found = poolMatch.entry.url;
-            method = "hub";
-          }
-        }
-      }
-
-      // Stufe 3 · Slug-Kandidaten über path_map (+ abgeleitete Pfade), live geprüft
-      if (!found) {
-        if (missingSegments(job.source_url, market as never, derivedMap).length) {
-          const resolved = await resolveMissingSegments(market, job.source_url, derivedMap);
-          for (const line of resolved.log) evidence.push({ step: "pfadverzeichnis", detail: line });
-          derivedMap = { ...derivedMap, ...resolved.map };
-        }
-        try {
-          const urls = buildTargetUrls(job.source_url, market, slug.slug_candidates, derivedMap);
-          for (const url of urls) {
-            const v = await verifyUrl(url);
-            checked.push({ url, status: v.http_status });
-            evidence.push({ step: "slug", detail: `${url} → HTTP ${v.http_status}` });
-            if (v.ok) {
-              found = url;
-              method = "slug";
-              break;
-            }
-          }
-        } catch (e) {
-          if (!(e instanceof PathMapError)) throw e;
-          // Pfadlücken beenden den Job nicht mehr: das Ergebnis ist dann
-          // "Zielseite nicht auffindbar", die Pipeline plant eine Neuerstellung.
-          evidence.push({
-            step: "slug",
-            detail: `${e.message} Schritt läuft ohne Slug-Prüfung weiter.`,
-          });
-        }
-      }
-
-      const status: TargetStatus = found
-        ? "EXISTS"
-        : checked.some((c) => c.status === 404)
-          ? "VERIFIED_404"
-          : "NOT_IN_INDEX";
-
-      const doc = found ? await extractPage(found) : null;
-      const target = {
-        status,
-        url: found,
-        checked,
-        doc,
-        resolution_method: method,
-        hreflang_hint: hint,
-        evidence,
-      };
-      return {
-        output: {
-          status,
-          url: found,
-          checked,
-          resolution_method: method,
-          hreflang_hint: hint,
-          evidence,
-          derived_path_map: derivedMap,
-          hreflang_pool: harvest?.entries.length ?? 0,
-        },
-        context: {
-          target,
-          ...(harvest ? { hreflangHarvest: harvest, derivedPathMap: derivedMap } : {}),
-        },
-      };
-    }
-
-
-    case "S4_compare": {
-      const source = requireSource(ctx);
-      if (!ctx.target?.doc) {
-        return {
-          output: { skipped: true, reason: "Kein bestehender Zielinhalt – Neuerstellung." },
-          context: { compare: { new_page: true } },
-        };
-      }
-      const tpl = await loadTemplate("compare");
-      const t = ctx.target.doc;
-      const res = await runPrompt(tpl, {
-        de_structure: source.outline,
-        de_word_count: source.wordCount,
-        target_structure: t.outline,
-        target_word_count: t.wordCount,
-        target_excerpt: t.sections
-          .map((s) => s.text)
-          .join("\n")
-          .slice(0, 4000),
-      });
-      return {
-        output: res.data,
-        context: { compare: res.data },
-        model: res.model,
-        promptSnapshot: res.promptSnapshot,
-        tokensIn: res.tokensIn,
-        tokensOut: res.tokensOut,
-      };
-    }
-
-    case "S7a_link_pool": {
-      const source = requireSource(ctx);
-      const hm = hubMarket(market);
-      // Stufe 0 · hreflang-Äquivalente der im Content verlinkten Quellartikel.
-      let harvest = ctx.hreflangHarvest ?? null;
-      if (!harvest) {
-        const res = await harvestHreflangEquivalents(source.contentLinks ?? [], hm);
-        harvest = {
-          checked: res.checked,
-          entries: res.entries,
-          discovered: res.discovered,
-          derived_path_map: res.derivedPathMap,
-          harvested_at: new Date().toISOString(),
-        };
-      }
-      const derivedMap = {
-        ...(await loadMarketPathMap(market.id)),
-        ...harvest.derived_path_map,
-        ...(ctx.derivedPathMap ?? {}),
-      };
-      const { topic, warning: topicWarning } = buildArticleTopic({
-        source,
-        sourceUrl: job.source_url,
-        slug: ctx.slug,
-        market,
-        combinedMap: derivedMap,
-      });
-      const pool = await buildLinkPool(hm, job.source_url, derivedMap);
-      const known = new Set(pool.entries.map((e) => e.url));
-      for (const e of harvest.entries) {
-        if (!known.has(e.url)) {
-          known.add(e.url);
-          pool.entries.unshift(e);
-        }
-      }
-      // Zweite Ebene: nicht abgerufene Quellkandidaten – werden mitgeführt und
-      // gespeichert, sind aber (scope = source_candidate) nicht direkt nutzbar.
-      for (const e of harvest.discovered ?? []) {
-        if (!known.has(e.url)) {
-          known.add(e.url);
-          pool.entries.push(e);
-        }
-      }
-      if (!pool.entries.length) {
-        throw new Error(
-          `Kein Link-Pool aufbaubar: keine der ${pool.fetches.length} abgerufenen Seiten lieferte interne Links. ` +
-            `Bitte path_map, magazine_root und Domain des Markts prüfen.`,
-        );
-      }
-      // Persistenz mit TTL: alte Einträge dieses Markts/Typs verfallen nach 7 Tagen.
-      const cutoff = new Date(Date.now() - POOL_TTL_MS).toISOString();
-      await supabaseAdmin
-        .from("link_pool")
-        .delete()
-        .eq("market_id", market.id)
-        .lt("fetched_at", cutoff);
-      for (const chunk of chunked(pool.entries, 200)) {
-        await supabaseAdmin.from("link_pool").upsert(
-          chunk.map((e) => ({
-            market_id: market.id,
-            content_type: "magazine",
-            source_page: e.source_page,
-            url: e.url,
-            anchor_text: e.anchor_text,
-            path_type: e.path_type,
-            origin: e.origin,
-            fetched: e.fetched !== false,
-            intent: e.intent ?? null,
-            scope: e.scope ?? "target",
-            http_status: e.fetched === false ? null : 200,
-            fetched_at: new Date().toISOString(),
-          })) as never,
-          { onConflict: "market_id,content_type,url" },
-        );
-      }
-      return {
-        output: {
-          hub_url: pool.hub_url,
-          fetches: pool.fetches,
-          hreflang_pool: harvest.entries.length,
-          hreflang_checked: harvest.checked.length,
-          nachbarseiten_abgerufen: harvest.checked.length,
-          quellkandidaten_nicht_abgerufen: harvest.discovered?.length ?? 0,
-          derived_path_map: derivedMap,
-          entries: pool.entries.length,
-          siblings: pool.siblings.map((s) => ({ url: s.url, title: s.title })),
-          by_origin: countBy(pool.entries.map((e) => e.origin)),
-          ...(topicWarning ? { topic_warning: topicWarning } : {}),
-        },
-        context: {
-          hreflangHarvest: harvest,
-          derivedPathMap: derivedMap,
-          articleTopic: topic,
-          linkPool: {
-            hub_url: pool.hub_url,
-            built_at: new Date().toISOString(),
-            fetches: pool.fetches,
-            entries: pool.entries,
-            siblings: pool.siblings,
-          },
-        },
-      };
-    }
-
-    case "S7b_serp_gap": {
-      const source = requireSource(ctx);
-      const poolEntries: PoolEntry[] = [...(ctx.linkPool?.entries ?? [])];
-      if (!poolEntries.length) {
-        throw new Error("Kein Link-Pool vorhanden – bitte zuerst S7a ausführen.");
-      }
-      const { credentialsPresent, runSerpQueries, marketHost, SERP_MAX_QUERIES } = await import(
-        "./serp.server"
-      );
-      if (!credentialsPresent()) {
-        throw new Error(
-          "DataForSEO ist nicht konfiguriert (DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD fehlen).",
-        );
-      }
-      const serpMarket = {
-        domain: market.domain,
-        locale: market.locale,
-        language: market.language,
-        country: market.country,
-        path_prefix: (market["path_prefix"] as string | null) ?? null,
-      };
-
-      const host = marketHost(serpMarket);
-      const topic = source.h1 ?? source.title ?? job.source_url;
-      const knownUrls = new Set(poolEntries.map((e) => e.url.replace(/\/$/, "")));
-
-      // 1 · KI formuliert die Suchanfragen anhand der bestehenden Poollücken.
-      const tplQ = await loadTemplate("serp_gap_queries");
-      const resQ = await runPrompt<unknown>(tplQ, {
-        country: market.country,
-        language: market.language,
-        host,
-        topic,
-        max_queries: String(SERP_MAX_QUERIES),
-        de_outline: source.outline.slice(0, 3000),
-        de_content_links: (source.contentLinks ?? [])
-          .slice(0, 40)
-          .map((l) => `- ${l.anchor} → ${l.url}`)
-          .join("\n"),
-        pool_urls: poolEntries
-          .filter(isUsable)
-          .slice(0, 80)
-          .map((e) => `- ${e.anchor_text ?? ""} → ${e.url}`)
-          .join("\n"),
-      });
-      const rawQueries = ((): string[] => {
-        const d = resQ.data as { queries?: unknown } | unknown[];
-        const arr = Array.isArray(d) ? d : Array.isArray((d as { queries?: unknown })?.queries)
-          ? ((d as { queries: unknown[] }).queries)
-          : [];
-        return arr
-          .map((q) => (typeof q === "string" ? q : ((q as { query?: string })?.query ?? "")))
-          .map((q) => q.trim())
-          .filter(Boolean);
-      })();
-      const queries = [...new Set(rawQueries)].slice(0, SERP_MAX_QUERIES);
-      if (!queries.length) throw new Error("Die KI hat keine Suchanfragen geliefert.");
-
-      // 2 · DataForSEO (nur 1. Ergebnisseite, hartes 5-Minuten-Budget).
-      const serp = await runSerpQueries(queries, serpMarket);
-      const seen = new Set<string>();
-      const items = serp.results
-        .flatMap((r) => r.items)
-        .filter((i) => {
-          const key = i.url.replace(/\/$/, "");
-          if (seen.has(key) || knownUrls.has(key)) return false;
-          seen.add(key);
-          return true;
-        })
-        .slice(0, 40);
-
-      const resultLog = serp.results.map((r) => ({
-        query: r.query,
-        keyword: r.keyword,
-        status: r.status,
-        hits: r.items.length,
-        ...(r.error ? { error: r.error } : {}),
-      }));
-
-      // Keine einzige erfolgreiche Abfrage → Schritt gilt als fehlgeschlagen (z. B. 401 = falsche Zugangsdaten).
-      if (!serp.results.some((r) => r.status === "ok")) {
-        const first = serp.results.find((r) => r.error)?.error ?? "unbekannter Fehler";
-        throw new Error(
-          first.includes("401")
-            ? "DataForSEO lehnt die Zugangsdaten ab (HTTP 401). Bitte API-Login und API-Passwort aus dem DataForSEO-Konto hinterlegen."
-            : `Keine SERP-Abfrage war erfolgreich: ${first}`,
-        );
-      }
-
-
-
-      const added: { url: string; anchor_text: string | null; intent: string | null }[] = [];
-      const rejected: { url: string; reason: string }[] = [];
-      let selectSnapshot = "";
-      let selModel: string | undefined;
-      let tokensIn = resQ.tokensIn;
-      let tokensOut = resQ.tokensOut;
-
-      if (items.length) {
-        // 3 · KI wählt aus den SERP-Treffern nur die potentiell nützlichen aus.
-        const tplS = await loadTemplate("serp_gap_select");
-        const resS = await runPrompt<unknown>(tplS, {
-          country: market.country,
-          language: market.language,
-          host,
-          topic,
-          serp_results: items
-            .map(
-              (i, n) =>
-                `${n + 1}. ${i.title ?? "(ohne Titel)"}\n   ${i.url}\n   ${i.description ?? ""}`,
-            )
-            .join("\n"),
-        });
-        selectSnapshot = resS.promptSnapshot;
-        selModel = resS.model;
-        tokensIn += resS.tokensIn;
-        tokensOut += resS.tokensOut;
-        const chosen = ((): { url: string; anchor_text: string | null; intent: string | null }[] => {
-          const d = resS.data as { selected?: unknown } | unknown[];
-          const arr = Array.isArray(d)
-            ? d
-            : Array.isArray((d as { selected?: unknown })?.selected)
-              ? ((d as { selected: unknown[] }).selected)
-              : [];
-          return arr
-            .map((s) => {
-              const o = s as { url?: string; index?: number; anchor_text?: string; intent?: string };
-              const byIndex =
-                typeof o.index === "number" && o.index >= 1 && o.index <= items.length
-                  ? items[o.index - 1]
-                  : undefined;
-              const url = o.url ?? byIndex?.url ?? "";
-              const match = items.find((i) => i.url.replace(/\/$/, "") === url.replace(/\/$/, ""));
-              if (!match) return null;
-              return {
-                url: match.url,
-                anchor_text: o.anchor_text ?? match.title ?? null,
-                intent: o.intent ?? match.description ?? null,
-              };
-            })
-            .filter(Boolean) as { url: string; anchor_text: string | null; intent: string | null }[];
-        })();
-
-        // 4 · Kurze technische Prüfung, bevor etwas in den Pool wandert.
-        for (const c of chosen) {
-          const v = await verifyUrl(c.url);
-          if (!v.ok) {
-            rejected.push({ url: c.url, reason: v.reason ?? `HTTP ${v.http_status}` });
-            continue;
-          }
-          added.push(c);
-          const entry: PoolEntry = {
-            url: c.url,
-            anchor_text: c.anchor_text,
-            path_type: isMagazineUrl(c.url, market) ? "magazine" : "other",
-            origin: "serp",
-            source_page: `serp:${host}`,
-            fetched: true,
-            intent: c.intent,
-            scope: "target",
-          };
-          poolEntries.push(entry);
-          await supabaseAdmin.from("link_pool").upsert(
+      } catch (err) {
+        if (err instanceof LocalizeError) {
+          throw new PipelineQualityError(
+            err.message,
+            { failed: err.failed, localized_ok: err.partial.length, calls: err.stats.calls },
             {
-              market_id: market.id,
-              content_type: "magazine",
-              source_page: entry.source_page,
-              url: entry.url,
-              anchor_text: entry.anchor_text,
-              path_type: entry.path_type,
-              origin: entry.origin,
-              fetched: true,
-              intent: entry.intent,
-              scope: "target",
-              http_status: v.http_status,
-              fetched_at: new Date().toISOString(),
-            } as never,
-            { onConflict: "market_id,content_type,url" },
+              ...(err.stats.model ? { model: err.stats.model } : {}),
+              ...(err.stats.promptSnapshot ? { promptSnapshot: err.stats.promptSnapshot } : {}),
+              tokensIn: err.stats.tokensIn,
+              tokensOut: err.stats.tokensOut,
+            },
           );
         }
+        throw err;
       }
+    }
 
-      const serpGap = {
-        ran_at: new Date().toISOString(),
-        queries,
-        location_code: serp.location_code,
-        language_code: serp.language_code,
-        host,
-        results: resultLog,
-        added,
-        rejected,
-      };
-
+    case "review": {
+      const source = requireSource(ctx);
+      if (!ctx.localized) throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+      const tpl = await loadTemplate("localization_review");
+      const res = await reviewDocument({
+        source: source.blocks,
+        localized: ctx.localized,
+        findings: ctx.findings ?? [],
+        market,
+        call: promptCall(tpl),
+      });
       return {
-        output: {
-          ...serpGap,
-          serp_hits: items.length,
-          pool_size: poolEntries.length,
-        },
+        output: { ...res.review, export_length: res.exportMarkdown.length },
         context: {
-          serpGap,
-          ...(ctx.linkPool ? { linkPool: { ...ctx.linkPool, entries: poolEntries } } : {}),
+          localized: res.localized,
+          review: res.review,
+          exportMarkdown: res.exportMarkdown,
         },
-        model: selModel ?? resQ.model,
-        promptSnapshot: [resQ.promptSnapshot, selectSnapshot].filter(Boolean).join("\n\n=====\n\n"),
-        tokensIn,
-        tokensOut,
-      };
-    }
-
-    case "S7c_serp_opportunities": {
-      const source = requireSource(ctx);
-      const poolEntries: PoolEntry[] = [...(ctx.linkPool?.entries ?? [])];
-      if (!poolEntries.length) {
-        throw new Error("Kein Link-Pool vorhanden – bitte zuerst S7a ausführen.");
-      }
-      const {
-        credentialsPresent,
-        runSerpQueries,
-        siteOperand,
-        marketHost,
-        SERP_MAX_OPPORTUNITY_QUERIES,
-      } = await import("./serp.server");
-      if (!credentialsPresent()) {
-        throw new Error(
-          "DataForSEO ist nicht konfiguriert (DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD fehlen).",
-        );
-      }
-      const serpMarket = {
-        domain: market.domain,
-        locale: market.locale,
-        language: market.language,
-        country: market.country,
-        path_prefix: (market["path_prefix"] as string | null) ?? null,
-      };
-      const host = marketHost(serpMarket);
-      const site = siteOperand(serpMarket);
-      const topic = source.h1 ?? source.title ?? job.source_url;
-      const knownUrls = new Set(poolEntries.map((e) => e.url.replace(/\/$/, "")));
-
-      // 1 · KI liest den Quelltext und leitet zusätzliche Linkchancen ab.
-      const tplQ = await loadTemplate("serp_opportunity_queries");
-      const resQ = await runPrompt<unknown>(tplQ, {
-        country: market.country,
-        language: market.language,
-        host,
-        site,
-        path_prefix: serpMarket.path_prefix ?? "",
-        topic,
-        max_queries: String(SERP_MAX_OPPORTUNITY_QUERIES),
-        de_outline: source.outline.slice(0, 3000),
-        de_sections: source.sections
-          .map((s) => `## ${s.heading}\n${s.text.slice(0, 800)}`)
-          .join("\n\n")
-          .slice(0, 12000),
-        pool_urls: poolEntries
-          .filter(isUsable)
-          .slice(0, 80)
-          .map((e) => `- ${e.anchor_text ?? ""} → ${e.url}`)
-          .join("\n"),
-        existing_queries: (ctx.serpGap?.queries ?? []).join("\n"),
-      });
-      const ideas = ((): { topic: string; query: string; reason?: string }[] => {
-        const d = resQ.data as { opportunities?: unknown; queries?: unknown } | unknown[];
-        const arr = Array.isArray(d)
-          ? d
-          : Array.isArray((d as { opportunities?: unknown })?.opportunities)
-            ? ((d as { opportunities: unknown[] }).opportunities)
-            : Array.isArray((d as { queries?: unknown })?.queries)
-              ? ((d as { queries: unknown[] }).queries)
-              : [];
-        const out: { topic: string; query: string; reason?: string }[] = [];
-        const seenQ = new Set<string>();
-        for (const raw of arr) {
-          const o =
-            typeof raw === "string"
-              ? { query: raw }
-              : (raw as { query?: string; keyword?: string; topic?: string; reason?: string });
-          const query = (o.query ?? o.keyword ?? "").trim();
-          if (!query || seenQ.has(query.toLowerCase())) continue;
-          seenQ.add(query.toLowerCase());
-          out.push({
-            topic: (o.topic ?? query).trim(),
-            query,
-            ...(o.reason ? { reason: o.reason } : {}),
-          });
-        }
-        return out.slice(0, SERP_MAX_OPPORTUNITY_QUERIES);
-      })();
-      if (!ideas.length) throw new Error("Die KI hat keine zusätzlichen Suchanfragen geliefert.");
-
-      // 2 · DataForSEO, bis zu 10 Abfragen, hartes 5-Minuten-Budget.
-      const serp = await runSerpQueries(
-        ideas.map((i) => i.query),
-        serpMarket,
-        { maxQueries: SERP_MAX_OPPORTUNITY_QUERIES },
-      );
-      const seen = new Set<string>();
-      const items = serp.results
-        .flatMap((r) => r.items)
-        .filter((i) => {
-          const key = i.url.replace(/\/$/, "");
-          if (seen.has(key) || knownUrls.has(key)) return false;
-          seen.add(key);
-          return true;
-        })
-        .slice(0, 60);
-
-      const resultLog = serp.results.map((r) => ({
-        query: r.query,
-        keyword: r.keyword,
-        status: r.status,
-        hits: r.items.length,
-        ...(r.error ? { error: r.error } : {}),
-      }));
-
-      if (!serp.results.some((r) => r.status === "ok")) {
-        const first = serp.results.find((r) => r.error)?.error ?? "unbekannter Fehler";
-        throw new Error(
-          first.includes("401")
-            ? "DataForSEO lehnt die Zugangsdaten ab (HTTP 401). Bitte API-Login und API-Passwort aus dem DataForSEO-Konto hinterlegen."
-            : `Keine SERP-Abfrage war erfolgreich: ${first}`,
-        );
-      }
-
-      const added: { url: string; anchor_text: string | null; intent: string | null }[] = [];
-      const rejected: { url: string; reason: string }[] = [];
-      let selectSnapshot = "";
-      let selModel: string | undefined;
-      let tokensIn = resQ.tokensIn;
-      let tokensOut = resQ.tokensOut;
-
-      if (items.length) {
-        // 3 · Auswahl der wirklich nützlichen Treffer.
-        const tplS = await loadTemplate("serp_gap_select");
-        const resS = await runPrompt<unknown>(tplS, {
-          country: market.country,
-          language: market.language,
-          host,
-          topic,
-          serp_results: items
-            .map(
-              (i, n) =>
-                `${n + 1}. ${i.title ?? "(ohne Titel)"}\n   ${i.url}\n   ${i.description ?? ""}`,
-            )
-            .join("\n"),
-        });
-        selectSnapshot = resS.promptSnapshot;
-        selModel = resS.model;
-        tokensIn += resS.tokensIn;
-        tokensOut += resS.tokensOut;
-        const chosen = ((): { url: string; anchor_text: string | null; intent: string | null }[] => {
-          const d = resS.data as { selected?: unknown } | unknown[];
-          const arr = Array.isArray(d)
-            ? d
-            : Array.isArray((d as { selected?: unknown })?.selected)
-              ? ((d as { selected: unknown[] }).selected)
-              : [];
-          return arr
-            .map((s) => {
-              const o = s as { url?: string; index?: number; anchor_text?: string; intent?: string };
-              const byIndex =
-                typeof o.index === "number" && o.index >= 1 && o.index <= items.length
-                  ? items[o.index - 1]
-                  : undefined;
-              const url = o.url ?? byIndex?.url ?? "";
-              const match = items.find((i) => i.url.replace(/\/$/, "") === url.replace(/\/$/, ""));
-              if (!match) return null;
-              return {
-                url: match.url,
-                anchor_text: o.anchor_text ?? match.title ?? null,
-                intent: o.intent ?? match.description ?? null,
-              };
-            })
-            .filter(Boolean) as { url: string; anchor_text: string | null; intent: string | null }[];
-        })();
-
-        // 4 · Kurze technische Prüfung, bevor etwas in den Pool wandert.
-        for (const c of chosen) {
-          const v = await verifyUrl(c.url);
-          if (!v.ok) {
-            rejected.push({ url: c.url, reason: v.reason ?? `HTTP ${v.http_status}` });
-            continue;
-          }
-          added.push(c);
-          const entry: PoolEntry = {
-            url: c.url,
-            anchor_text: c.anchor_text,
-            path_type: isMagazineUrl(c.url, market) ? "magazine" : "other",
-            origin: "serp",
-            source_page: `serp-chance:${site}`,
-            fetched: true,
-            intent: c.intent,
-            scope: "target",
-          };
-          poolEntries.push(entry);
-          await supabaseAdmin.from("link_pool").upsert(
-            {
-              market_id: market.id,
-              content_type: "magazine",
-              source_page: entry.source_page,
-              url: entry.url,
-              anchor_text: entry.anchor_text,
-              path_type: entry.path_type,
-              origin: entry.origin,
-              fetched: true,
-              intent: entry.intent,
-              scope: "target",
-              http_status: v.http_status,
-              fetched_at: new Date().toISOString(),
-            } as never,
-            { onConflict: "market_id,content_type,url" },
-          );
-        }
-      }
-
-      const serpOpportunities = {
-        ran_at: new Date().toISOString(),
-        site,
-        host,
-        path_prefix: serp.path_prefix,
-        location_code: serp.location_code,
-        language_code: serp.language_code,
-        ideas,
-        results: resultLog,
-        added,
-        rejected,
-      };
-
-      return {
-        output: {
-          ...serpOpportunities,
-          serp_hits: items.length,
-          pool_size: poolEntries.length,
-        },
-        context: {
-          serpOpportunities,
-          ...(ctx.linkPool ? { linkPool: { ...ctx.linkPool, entries: poolEntries } } : {}),
-        },
-        model: selModel ?? resQ.model,
-        promptSnapshot: [resQ.promptSnapshot, selectSnapshot].filter(Boolean).join("\n\n=====\n\n"),
-        tokensIn,
-        tokensOut,
-      };
-    }
-
-
-    case "S5_style_profile": {
-      const { data: cached } = await supabaseAdmin
-        .from("style_profiles")
-        .select("profile")
-        .eq("market_id", market.id)
-        .eq("content_type", "magazine")
-        .maybeSingle();
-      if (cached?.profile) {
-        return {
-          output: { cached: true, profile: cached.profile },
-          context: { styleProfile: cached.profile },
-        };
-      }
-      const siblings = ctx.linkPool?.siblings ?? [];
-      const referenceTexts = siblings
-        .map((s) => [s.title, s.text].filter(Boolean).join("\n"))
-        .join("\n---\n");
-      if (!referenceTexts.trim()) {
-        return {
-          output: {
-            cached: false,
-            skipped: true,
-            profile: null,
-            hint:
-              "Keine Geschwisterartikel im Link-Pool gefunden – Stilprofil übersprungen, " +
-              "es gilt ein neutraler Standard ohne Stilvorgaben.",
-          },
-          context: { styleProfile: {} },
-        };
-      }
-      const tpl = await loadTemplate("style_profile");
-      const res = await runPrompt(tpl, { reference_texts: referenceTexts.slice(0, 12000) });
-      await supabaseAdmin
-        .from("style_profiles")
-        .insert({ market_id: market.id, content_type: "magazine", profile: res.data as never });
-      return {
-        output: { sources: siblings.map((s) => s.url), profile: res.data },
-        context: { styleProfile: res.data },
-        model: res.model,
-        promptSnapshot: res.promptSnapshot,
-        tokensIn: res.tokensIn,
-        tokensOut: res.tokensOut,
-      };
-    }
-
-    case "S6_localization_plan": {
-      const source = requireSource(ctx);
-      const tpl = await loadTemplate("localization_plan");
-      const inlineLinks = (source.contentLinks ?? [])
-        .filter((l) => l.kind !== "teaser")
-        .map((l) => ({
-          section_heading: l.section_heading ?? "",
-          anchor: l.anchor_clean || l.anchor,
-          url: l.url,
-          sentence: l.sentence ?? "",
-        }));
-      const res = await runPrompt<unknown>(tpl, {
-        de_outline: source.sections
-          .map((s) => `${"#".repeat(s.level)} ${s.heading}\n${s.text.slice(0, 500)}`)
-          .join("\n\n"),
-        market_profile: {
-          country: market.country,
-          language: market.language,
-          brand: market.brand,
-          institutions: market.institutions,
-          forbidden_claims: market.forbidden_claims,
-          address_form: market.address_form,
-        },
-        country: market.country,
-        language: market.language,
-        article_subject: ctx.articleTopic?.main_subject_de ?? source.h1 ?? "",
-        de_content_links: inlineLinks,
-      });
-      const parsed = validateStepData("S6_localization_plan", S6OutputSchema, res.data);
-      const sections = parsed.sections as PlanSection[];
-      return {
-        output: {
-          sections,
-          anchor_count: sections.reduce((n, s) => n + (s.anchors?.length ?? 0), 0),
-        },
-        context: { plan: { sections } },
-        model: res.model,
-        promptSnapshot: res.promptSnapshot,
-        tokensIn: res.tokensIn,
-        tokensOut: res.tokensOut,
-      };
-    }
-
-    case "S7_link_candidates": {
-      const plan = ctx.plan?.sections ?? [];
-      const anchors = plan.flatMap((s) => s.anchors ?? []);
-      if (!anchors.length) throw new Error("S6 hat keine Anker geliefert – S7 kann nichts suchen.");
-      const hm = hubMarket(market);
-      const poolEntries: PoolEntry[] = [...(ctx.linkPool?.entries ?? [])];
-      if (!poolEntries.length) throw new Error("Kein Link-Pool vorhanden – bitte S7a ausführen.");
-
-      // Anker-Metadaten (Abschnitt, Herkunft, Quell-URL) für Themenfilter + hreflang-Beleg.
-      const anchorMeta = new Map<
-        string,
-        { section_de_heading: string; origin?: "source_link" | "plan"; source_url?: string | null }
-      >();
-      for (const s of plan) {
-        for (const a of s.anchors ?? []) {
-          anchorMeta.set(a.anchor, {
-            section_de_heading: s.de_heading,
-            ...(a.origin ? { origin: a.origin } : {}),
-            ...(a.source_url ? { source_url: a.source_url } : {}),
-          });
-        }
-      }
-
-      const derivedMap = { ...(ctx.derivedPathMap ?? {}) };
-      const categorySegments = getCategorySegments(market, derivedMap, poolEntries);
-      const refCategory = ctx.articleTopic?.category_segment_target ?? null;
-
-      const candidates: Record<
-        string,
-        { url: string; title: string; path_type: string; category_segment?: string }[]
-      > = {};
-      const log: SearchLogEntry[] = [];
-      let searchBudget = SEARCH_BUDGET;
-
-      for (const a of anchors) {
-        const meta = anchorMeta.get(a.anchor);
-        const query = [a.anchor, ...(a.search_terms ?? []), a.intent ?? ""].filter(Boolean).join(" ");
-        // Referenz-Kategorie: bei source_link die der Quell-URL, sonst die des Artikels.
-        let referenceCategory = refCategory;
-        if (meta?.origin === "source_link" && meta.source_url) {
-          const srcCat = categorySegmentOfUrl(meta.source_url);
-          if (srcCat) referenceCategory = translateSegment(srcCat, market, derivedMap) ?? srcCat;
-        }
-        const preferOverview = /(übersicht|overview|ratgeber|guide|advice|magazin|magazine|alle|all)\b/i.test(
-          `${a.anchor} ${a.intent ?? ""}`,
-        );
-        const topicFilter = {
-          referenceCategory,
-          categorySegments,
-          magazineRoot: market.magazine_root ?? null,
-          preferOverview,
-        };
-        // Stufe 1 · Retrieval im Link-Pool (mit Themenfilter).
-        let hits = retrieveFromPool(query, poolEntries, { pathType: a.path_type, limit: 8, topic: topicFilter });
-        if (!hits.length && a.path_type) hits = retrieveFromPool(query, poolEntries, { limit: 8, topic: topicFilter });
-
-        // source_link: belegtes hreflang-Äquivalent der Quell-URL zuerst.
-        if (meta?.origin === "source_link" && meta.source_url) {
-          const deUrl = meta.source_url.replace(/\/$/, "");
-          const hreflangHit = poolEntries.find(
-            (e) => e.origin === "hreflang" && e.source_page.replace(/\/$/, "") === deUrl,
-          );
-          if (hreflangHit) {
-            hits = [
-              {
-                url: hreflangHit.url,
-                title: hreflangHit.anchor_text || hreflangHit.url,
-                path_type: hreflangHit.path_type,
-                origin: hreflangHit.origin,
-                score: 999,
-              },
-              ...hits.filter((h) => h.url !== hreflangHit.url),
-            ].slice(0, 8);
-          }
-        }
-
-        // Stufe 2 · gezielte Site-Suche, wenn der Pool zu schwach ist
-        let stage2 = false;
-        let stage2Source: "internal" | "web" | "none" | undefined;
-        if ((!hits.length || (hits[0]?.score ?? 0) < MIN_POOL_SCORE) && searchBudget > 0) {
-          stage2 = true;
-          searchBudget--;
-          const terms = (a.search_terms?.length ? a.search_terms : [a.anchor]).join(" ");
-          const found = await siteSearch(hm, terms);
-          stage2Source = found.source;
-          if (found.entries.length) {
-            found.entries.forEach((e) => {
-              if (!poolEntries.some((p) => p.url === e.url)) poolEntries.push(e);
-            });
-            hits = retrieveFromPool(query, poolEntries, { limit: 8, topic: topicFilter });
-          }
-        }
-
-        candidates[a.anchor] = hits.map((c) => ({
-          url: c.url,
-          title: c.title,
-          path_type: c.path_type,
-          ...(categorySegmentOfUrl(c.url) ? { category_segment: categorySegmentOfUrl(c.url)! } : {}),
-        }));
-        log.push({
-          anchor: a.anchor,
-          search_terms: a.search_terms ?? [],
-          stage2,
-          ...(stage2Source ? { stage2_source: stage2Source } : {}),
-          hits: hits.length,
-        });
-      }
-
-      return {
-        output: { anchors: anchors.length, candidates, search_log: log },
-        context: { linkCandidates: candidates, linkSearchLog: log },
-      };
-    }
-
-    case "S8_link_select": {
-      const candidates = ctx.linkCandidates ?? {};
-      const source = requireSource(ctx);
-      const tpl = await loadTemplate("link_select");
-      const selection: {
-        anchor: string;
-        url: string | null;
-        confidence?: string;
-        reason?: string;
-        origin?: "source_link" | "plan";
-      }[] = [];
-      const snapshots: string[] = [];
-      let tokensIn = 0;
-      let tokensOut = 0;
-
-      const normHead = (s: string) =>
-        s
-          .toLowerCase()
-          .normalize("NFKD")
-          .replace(/[\u0300-\u036f]/g, "")
-          .replace(/[^a-z0-9]+/g, " ")
-          .trim();
-
-      // Anker-Metadaten: Herkunft, Abschnitt und echter Kontext-Satz.
-      const anchorMeta = new Map<
-        string,
-        { origin?: "source_link" | "plan"; section_de_heading: string; context_sentence: string }
-      >();
-      for (const s of ctx.plan?.sections ?? []) {
-        const body =
-          source.sections.find((sec) => normHead(sec.heading) === normHead(s.de_heading))?.text ?? "";
-        for (const a of s.anchors ?? []) {
-          let contextSentence = "";
-          if (a.origin === "source_link" && a.source_url) {
-            const cl = (source.contentLinks ?? []).find(
-              (l) => l.url.replace(/\/$/, "") === a.source_url!.replace(/\/$/, ""),
-            );
-            contextSentence = cl?.sentence ?? "";
-          }
-          if (!contextSentence) {
-            contextSentence = bestSentenceInSection(body, a.anchor, a.search_terms ?? []);
-          }
-          anchorMeta.set(a.anchor, {
-            ...(a.origin ? { origin: a.origin } : {}),
-            section_de_heading: s.de_heading,
-            context_sentence: contextSentence,
-          });
-        }
-      }
-
-      for (const [anchor, list] of Object.entries(candidates)) {
-        const meta = anchorMeta.get(anchor);
-        if (!list.length) {
-          selection.push({ anchor, url: null, ...(meta?.origin ? { origin: meta.origin } : {}) });
-          continue;
-        }
-        const res = await runPrompt<unknown>(tpl, {
-          anchor,
-          context_sentence: meta?.context_sentence ?? anchor,
-          article_topic: source.h1 ?? source.title ?? "",
-          article_subject: ctx.articleTopic?.main_subject_de ?? source.h1 ?? "",
-          section_heading: meta?.section_de_heading ?? "",
-          candidates: list
-            .map((c, i) => `${i + 1}. ${c.title} [${c.path_type}${c.category_segment ? ` · ${c.category_segment}` : ""}]`)
-            .join("\n"),
-        });
-        const parsed = validateStepData("S8_link_select", S8OutputSchema, res.data);
-        snapshots.push(res.promptSnapshot);
-        tokensIn += res.tokensIn;
-        tokensOut += res.tokensOut;
-        const idx = parsed.choice ?? parsed.candidate_index ?? null;
-        const chosen = typeof idx === "number" && idx >= 1 && idx <= list.length ? list[idx - 1]! : null;
-        selection.push({
-          anchor,
-          url: chosen?.url ?? null,
-          ...(parsed.confidence ? { confidence: parsed.confidence } : {}),
-          ...(parsed.reason ? { reason: parsed.reason } : {}),
-          ...(meta?.origin ? { origin: meta.origin } : {}),
-        });
-      }
-      return {
-        output: selection,
-        context: { linkSelection: selection },
-        promptSnapshot: snapshots.join("\n\n=====\n\n"),
-        model: tpl.model,
-        tokensIn,
-        tokensOut,
-      };
-    }
-
-    case "S9_link_verify": {
-      const selection = ctx.linkSelection ?? [];
-      const verified: JobContext["verifiedLinks"] = [];
-      const broken: NonNullable<JobContext["brokenLinks"]> = [];
-      const summaryTpl = await loadTemplate("link_summary");
-      const summarySnapshots: string[] = [];
-      let sumIn = 0;
-      let sumOut = 0;
-      // Anker → Quellabschnitt (für die abschnittsgenaue Zuweisung in S11).
-      const anchorSection = new Map<string, string>();
-      for (const sec of ctx.plan?.sections ?? []) {
-        for (const a of sec.anchors ?? []) anchorSection.set(a.anchor, sec.de_heading);
-      }
-      await supabaseAdmin.from("verified_links").delete().eq("job_id", job.id);
-      let first = true;
-      for (const s of selection) {
-        if (!s.url) continue;
-        if (!first) await new Promise((r) => setTimeout(r, 1000));
-        first = false;
-        const { verification: v, doc } = await verifyAndExtract(s.url);
-        if (!v.ok || v.http_status !== 200 || !v.canonical_ok) {
-          broken.push({
-            anchor: s.anchor,
-            url: s.url,
-            http_status: v.http_status,
-            reason: v.http_status !== 200 ? `HTTP ${v.http_status}` : "Canonical/Soft-404",
-          });
-          // Toter Poolkandidat: aus dem Pool entfernen, damit er nicht erneut gewählt wird.
-          await supabaseAdmin
-            .from("link_pool")
-            .delete()
-            .eq("market_id", market.id)
-            .eq("url", s.url);
-          continue;
-        }
-        // Jede verifizierte Zielseite wird einmal gelesen und in einem Absatz
-        // zusammengefasst, damit S11 den echten Inhalt kennt (nicht nur Titel/URL).
-        let summary = "";
-        let pageType = "";
-        if (doc) {
-          const body = doc.sections
-            .map((sec) => `${sec.heading}\n${sec.text}`)
-            .join("\n\n")
-            .slice(0, 6000);
-          try {
-            const res = await runPrompt<unknown>(summaryTpl, {
-              url: s.url,
-              title: doc.title ?? doc.h1 ?? "",
-              h1: doc.h1 ?? "",
-              meta_description: doc.metaDescription ?? "",
-              outline: doc.outline,
-              page_text: body,
-              language: market.language,
-            });
-            summarySnapshots.push(res.promptSnapshot);
-            sumIn += res.tokensIn;
-            sumOut += res.tokensOut;
-            const d = res.data as { summary?: unknown; page_type?: unknown } | string;
-            if (typeof d === "string") summary = d.trim();
-            else {
-              summary = typeof d?.summary === "string" ? d.summary.trim() : "";
-              pageType = typeof d?.page_type === "string" ? d.page_type.trim() : "";
-            }
-          } catch {
-            summary = "";
-          }
-          if (!pageType) {
-            pageType = doc.wordCount >= 250 ? "ratgeber" : "kategorie";
-          }
-        }
-
-        const secHeading = anchorSection.get(s.anchor);
-        const link = {
-          anchor: s.anchor,
-          target_url: s.url,
-          http_status: v.http_status,
-          canonical_ok: v.canonical_ok,
-          ...(s.confidence ? { confidence: s.confidence } : {}),
-          ...(summary ? { summary } : {}),
-          ...(pageType ? { page_type: pageType } : {}),
-          ...(s.origin ? { origin: s.origin } : {}),
-          ...(secHeading ? { section_de_heading: secHeading } : {}),
-        };
-        verified.push(link);
-        await supabaseAdmin.from("verified_links").insert({
-          job_id: job.id,
-          source: "pool",
-          anchor: link.anchor,
-          target_url: link.target_url,
-          http_status: link.http_status,
-          canonical_ok: link.canonical_ok,
-          ...(link.confidence ? { confidence: link.confidence } : {}),
-          ...(link.summary ? { summary: link.summary } : {}),
-          ...(link.page_type ? { page_type: link.page_type } : {}),
-        });
-      }
-      return {
-        output: { verified, broken },
-        context: { verifiedLinks: verified, brokenLinks: broken },
-        model: summaryTpl.model,
-        promptSnapshot: summarySnapshots.join("\n\n=====\n\n"),
-        tokensIn: sumIn,
-        tokensOut: sumOut,
-      };
-    }
-
-    case "S10_localize_tables": {
-      const source = requireSource(ctx);
-      if (!source.tables.length) return { output: [], context: { tables: [] } };
-      const tpl = await loadTemplate("localize_table");
-      const tables: { index: number; markdown: string }[] = [];
-      const snapshots: string[] = [];
-      let tokensIn = 0;
-      let tokensOut = 0;
-
-      for (const t of source.tables) {
-        let accepted: string | null = null;
-        let lastReason = "";
-        for (let attempt = 0; attempt < 3 && accepted === null; attempt++) {
-          const res = await runPrompt<unknown>(tpl, {
-            table_markdown: t.markdown,
-            language: market.language,
-            market_notes: `Land: ${market.country}. Institutionen: ${JSON.stringify(market.institutions)}`,
-          });
-          snapshots.push(res.promptSnapshot);
-          tokensIn += res.tokensIn;
-          tokensOut += res.tokensOut;
-          const md =
-            typeof res.data === "string"
-              ? res.data
-              : validateStepData("S10_localize_tables", S10OutputSchema, res.data).table_markdown;
-          const check = checkLocalizedTable(t.markdown, md, market.language);
-          if (check.ok) accepted = md;
-          else lastReason = check.reason ?? "unbekannt";
-        }
-        if (accepted === null) {
-          throw new Error(`Tabelle ${t.index + 1} konnte nicht lokalisiert werden: ${lastReason}`);
-        }
-        tables.push({ index: t.index, markdown: accepted });
-      }
-      return {
-        output: tables,
-        context: { tables },
-        model: tpl.model,
-        promptSnapshot: snapshots.join("\n\n=====\n\n"),
-        tokensIn,
-        tokensOut,
-      };
-    }
-
-    case "S11_generate_content": {
-      const source = requireSource(ctx);
-      const plan = ctx.plan?.sections ?? [];
-      if (!plan.length) throw new Error("Kein Lokalisierungsplan vorhanden – bitte S6 ausführen.");
-      const tpl = await loadTemplate("generate_content");
-
-      const inputs = buildSectionInputs({
-        plan,
-        sourceSections: source.sections,
-        tables: ctx.tables ?? [],
-        verifiedLinks: ctx.verifiedLinks ?? [],
-        styleProfile: ctx.styleProfile ?? {},
-        market: {
-          country: market.country,
-          language: market.language,
-          language_variant: market.language_variant,
-          brand: market.brand,
-          address_form: market.address_form,
-          institutions: market.institutions,
-          forbidden_claims: market.forbidden_claims,
-        },
-      });
-
-      const written: string[] = [];
-      const content: { heading: string; markdown: string }[] = [];
-      const snapshots: string[] = [];
-      const softWarnings: string[] = [];
-
-      let tokensIn = 0;
-      let tokensOut = 0;
-
-      // Linkbudget: jede Ziel-URL höchstens 2x, zweiter Einsatz nur mit anderem Ankertext.
-      const linkUsage = new Map<string, string[]>();
-      const allLinks = ctx.verifiedLinks ?? [];
-
-      const linkMeta = (l: (typeof allLinks)[number]) => {
-        const parts: string[] = [];
-        if (l.page_type) parts.push(`Seitentyp: ${l.page_type}`);
-        if (l.summary) parts.push(`Inhalt: ${l.summary}`);
-        return parts.length ? `\n  ${parts.join(" | ")}` : "";
-      };
-
-      const availableLinks = (list: typeof allLinks) =>
-        list
-          .filter((l) => (linkUsage.get(l.target_url)?.length ?? 0) < 2)
-          .map((l) => {
-            const used = linkUsage.get(l.target_url) ?? [];
-            return used.length
-              ? `- [${l.anchor}](${l.target_url}) — ACHTUNG: bereits 1x verlinkt (Ankertext: „${used.join("“, „")}“). Nur erneut verlinken, wenn der neue Ankertext komplett anders lautet und der Link inhaltlich wirklich nötig ist.${linkMeta(l)}`
-              : `- [${l.anchor}](${l.target_url})${linkMeta(l)}`;
-          })
-          .join("\n");
-
-      const usedLinksForPrompt = () => {
-        const rows = [...linkUsage.entries()].map(
-          ([url, anchors]) => `- ${url} — bereits ${anchors.length}x verlinkt als „${anchors.join("“, „")}“`,
-        );
-        return rows.length ? rows.join("\n") : "(noch keine Links gesetzt)";
-      };
-
-      const trackLinks = (markdown: string) => {
-        for (const l of allLinks) {
-          const escaped = l.target_url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-          const re = new RegExp(`\\[([^\\]]{1,200})\\]\\(\\s*${escaped}[^)]*\\)`, "g");
-          let m: RegExpExecArray | null;
-          while ((m = re.exec(markdown)) !== null) {
-            const list = linkUsage.get(l.target_url) ?? [];
-            list.push(m[1] ?? "");
-            linkUsage.set(l.target_url, list);
-          }
-        }
-      };
-
-      const hasLink = (markdown: string, url: string): boolean => {
-        const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        return new RegExp(`\\]\\(\\s*${escaped}[^)]*\\)`).test(markdown);
-      };
-
-      // Vorschau-Listen ({{planned_headings}}): alle Ziel-Überschriften in
-      // Planreihenfolge, ohne Einleitungsabschnitt und ohne "streichen".
-      const introHeading = plan[0]?.target_heading;
-      const plannedHeadings = plan
-        .filter((s) => s.action !== "streichen" && s.target_heading !== introHeading)
-        .map((s) => s.target_heading)
-        .join("\n");
-
-      for (const input of inputs) {
-        if (input.action === "streichen") continue;
-        const hashes = "#".repeat(input.heading_level);
-        // Inhaltsverzeichnis: nur Platzhalter, keine KI-Erstellung (#4).
-        if (input.is_toc) {
-          const placeholder = `${hashes} ${input.target_heading}\n\n[INHALTSVERZEICHNIS – Platzhalter]`;
-          written.push(input.target_heading);
-          content.push({ heading: input.target_heading, markdown: placeholder });
-          continue;
-        }
-        const previousContent = content.length
-          ? content.map((c) => c.markdown).join("\n\n")
-          : "(noch kein Abschnitt geschrieben – dies ist der erste Abschnitt)";
-        const sourceWithMarkers = input.de_body.replace(
-          /\[TABELLE (\d+)\]/g,
-          (_match, index: string) => `[[OMFIRE_TABLE_${index}]]`,
-        );
-        const requiredMarkers = input.tables.map((table) => `[[OMFIRE_TABLE_${table.index}]]`);
-        // Reine Tabellen-Abschnitte (nur Überschrift + Tabellenmarker, kein Fließtext)
-        // werden ohne LLM-Aufruf direkt zusammengesetzt – es gibt nichts zu übersetzen.
-        if (isTableOnlySection(sourceWithMarkers)) {
-          const markerLines = sourceWithMarkers
-            .split("\n")
-            .map((l) => l.trim())
-            .filter(Boolean);
-          let direct = `${hashes} ${input.target_heading}\n\n${markerLines.join("\n")}`;
-          for (const table of input.tables) {
-            direct = direct.replace(`[[OMFIRE_TABLE_${table.index}]]`, table.markdown);
-          }
-          written.push(input.target_heading);
-          content.push({ heading: input.target_heading, markdown: direct });
-          continue;
-        }
-        const sourceWords = countWords(sourceWithMarkers);
-        const maxTargetWords = Math.ceil(sourceWords * MAX_SECTION_WORD_RATIO + 5);
-        let md: string | null = null;
-        let fallback: string | null = null;
-        let lastReasons: string[] = [];
-        // Zugewiesene Links dieses Abschnitts vs. übrige (optionale) Kandidaten.
-        const assigned = allLinks.filter((l) => l.section_de_heading === input.de_heading);
-        const others = allLinks.filter((l) => l.section_de_heading !== input.de_heading);
-        let assignedRetried = false;
-
-        for (let attempt = 0; attempt < 3 && md === null; attempt++) {
-          // Vollständiges Objekt an das Modell – Tabellen nur als undurchsichtige Positionsmarker.
-          const res = await runPrompt<string>(tpl, {
-            language: market.language,
-            language_variant: market.language_variant ?? "",
-            country: market.country ?? "",
-            institutions: market.institutions ?? {},
-            forbidden_claims: market.forbidden_claims ?? [],
-            brand: market.brand ?? "",
-            address_form: market.address_form ?? "",
-            style_profile: input.style_profile,
-            style_example: "",
-            de_section: `${hashes} ${input.de_heading}\n${sourceWithMarkers}`,
-            target_heading: input.target_heading,
-            heading_level: input.heading_level,
-            heading_markup: `${hashes} ${input.target_heading}`,
-            action: input.action,
-            localization_notes: input.notes.join("\n- "),
-            written_headings: written.join(", "),
-            planned_headings: plannedHeadings,
-            assigned_links:
-              assigned.map((l) => `- [${l.anchor}](${l.target_url})${linkMeta(l)}`).join("\n") ||
-              "(keine)",
-            verified_links: availableLinks(others),
-            used_links: usedLinksForPrompt(),
-            previous_content: previousContent,
-            table_markers: requiredMarkers.join(", ") || "(keine)",
-            source_word_count: sourceWords,
-            max_target_words: maxTargetWords,
-            source_list_items: countListItems(sourceWithMarkers),
-            source_paragraphs: countParagraphs(sourceWithMarkers),
-            correction_notes: lastReasons.length ? lastReasons.join("\n- ") : "(erster Versuch)",
-          });
-          snapshots.push(res.promptSnapshot);
-          tokensIn += res.tokensIn;
-          tokensOut += res.tokensOut;
-          const raw = typeof res.data === "string" ? res.data : String(res.data);
-          // Härtung: Der Marker muss bereits im rohen Modell-Output wörtlich und
-          // genau einmal vorkommen – unabhängig davon, ob an seiner Stelle etwas
-          // Tabellenähnliches steht, das strukturell plausibel wirkt.
-          const rawMarkerProblems = requiredMarkers.filter(
-            (marker) => raw.split(marker).length - 1 !== 1,
-          );
-          const stripped = stripMarkdownTables(raw.trim());
-          let candidate = enforceHeadingLevel(stripped.text, input.heading_level, input.target_heading);
-          const markerProblems = requiredMarkers.filter(
-            (marker) => candidate.split(marker).length - 1 !== 1,
-          );
-          const guard = checkGeneratedSection(sourceWithMarkers, candidate);
-          const hard: string[] = [...guard.hardReasons];
-          if (rawMarkerProblems.length)
-            hard.push("Tabellen-Positionsmarker fehlt oder wurde im Roh-Output vervielfacht.");
-          if (stripped.removed.length) hard.push("Das Modell hat eine eigene Tabelle erzeugt.");
-          if (markerProblems.length) hard.push("Tabellen-Positionsmarker fehlt oder wurde vervielfacht.");
-          lastReasons = [...hard, ...guard.softReasons];
-
-          if (!markerProblems.length) {
-            for (const table of input.tables) {
-              candidate = candidate.replace(`[[OMFIRE_TABLE_${table.index}]]`, table.markdown);
-            }
-            const exact = checkExactTables(candidate, input.tables);
-            if (!exact.ok) {
-              hard.push("Die deterministisch eingesetzte Tabelle ist nicht exakt oder nicht eindeutig.");
-              lastReasons.push("Die deterministisch eingesetzte Tabelle ist nicht exakt oder nicht eindeutig.");
-            } else if (!hard.length) {
-              const cleaned = candidate.replace(/\n{3,}/g, "\n\n").trim();
-              // Zugewiesene Links: genau ein Korrekturversuch, sonst übernehmen.
-              const missingAssigned = assigned.filter((l) => !hasLink(cleaned, l.target_url));
-              if (missingAssigned.length && !assignedRetried) {
-                assignedRetried = true;
-                lastReasons.push(
-                  `Zugewiesener Link fehlt: ${missingAssigned
-                    .map((l) => `[${l.anchor}](${l.target_url})`)
-                    .join(", ")}. Setze ihn an der passenden Stelle, ohne neuen Satz.`,
-                );
-              } else if (!guard.softReasons.length) {
-                md = cleaned;
-              } else {
-                // Weiche Abweichungen: einmal nachbessern lassen, sonst übernehmen.
-                fallback = cleaned;
-              }
-            }
-          }
-        }
-        if (md === null && fallback !== null) {
-          md = fallback;
-          softWarnings.push(`„${input.target_heading}“: ${lastReasons.join(" ")}`);
-        }
-        if (md === null) {
-          throw new Error(
-            `Abschnitt „${input.target_heading}“ verletzt nach drei Versuchen die Strukturregeln: ${lastReasons.join(" ")}`,
-          );
-        }
-
-        // Zugewiesene Links, die weiterhin fehlen: als weicher Hinweis protokollieren.
-        for (const l of assigned) {
-          if (!hasLink(md, l.target_url)) {
-            softWarnings.push(`„${input.target_heading}“: zugewiesener Link [${l.anchor}](${l.target_url}) fehlt im Text.`);
-          }
-        }
-
-        written.push(input.target_heading);
-        content.push({ heading: input.target_heading, markdown: md });
-        trackLinks(md);
-      }
-      if (!content.length) throw new Error("S11 hat keinen Abschnitt erzeugt.");
-      // Schlussprüfung: jede lokalisierte Tabelle exakt einmal, keine fremde Tabelle.
-      const allTables = ctx.tables ?? [];
-      const exact = checkExactTables(content.map((c) => c.markdown).join("\n\n"), allTables);
-      if (!exact.ok) {
-        throw new Error(
-          `S11-Tabellenprüfung fehlgeschlagen: fehlend ${exact.missing.join(", ") || "keine"}, doppelt ${exact.duplicated.join(", ") || "keine"}, fremd ${exact.foreign}.`,
-        );
-      }
-      return {
-        output: softWarnings.length ? { sections: content, warnings: softWarnings } : content,
-        context: { content, contentWarnings: softWarnings },
-
-        model: tpl.model,
-        promptSnapshot: snapshots.join("\n\n=====\n\n"),
-        tokensIn,
-        tokensOut,
-      };
-    }
-
-    case "S12_qa": {
-      const source = requireSource(ctx);
-      const full = (ctx.content ?? []).map((c) => c.markdown).join("\n\n");
-      if (!full.trim()) throw new Error("Kein Content vorhanden – bitte S11 ausführen.");
-      const generated = ctx.content ?? [];
-      const planInputs = buildSectionInputs({
-        plan: ctx.plan?.sections ?? [],
-        sourceSections: source.sections,
-        tables: ctx.tables ?? [],
-        verifiedLinks: ctx.verifiedLinks ?? [],
-        styleProfile: ctx.styleProfile ?? {},
-        market: {},
-      }).filter((input) => input.action !== "streichen" && !input.is_toc);
-      const sectionPairs = planInputs.map((input) => ({
-        heading: input.target_heading,
-        source: input.de_body,
-        target: generated.find((item) => item.heading === input.target_heading)?.markdown ?? "",
-      }));
-      const deterministic = deterministicArticleIssues({
-        sourceText: source.sections.map((s) => s.text).join("\n\n"),
-        targetText: full,
-        tables: ctx.tables ?? [],
-        sections: sectionPairs,
-        brand: market.brand ?? "",
-        verifiedLinks: ctx.verifiedLinks ?? [],
-      });
-      const tpl = await loadTemplate("qa");
-      const res = await runPrompt<unknown>(tpl, {
-        full_text: full,
-        source_text: source.sections.map((s) => `H${s.level} ${s.heading}\n${s.text}`).join("\n\n"),
-        localized_tables: ctx.tables ?? [],
-        structure_report: sectionPairs.map((pair) => {
-          const src = normalizeForComparison(pair.source);
-          const tgt = normalizeForComparison(pair.target);
-          return {
-            heading: pair.heading,
-            source_words: countWords(src),
-            target_words: countWords(tgt),
-            source_list_items: countListItems(src),
-            target_list_items: countListItems(tgt),
-            source_paragraphs: countParagraphs(src),
-            target_paragraphs: countParagraphs(tgt),
-          };
-        }),
-
-        brand: market.brand ?? "",
-        forbidden_terms: market.forbidden_claims ?? [],
-        institutions: market.institutions ?? {},
-        country: market.country ?? "",
-        language: market.language,
-      });
-      const parsed = validateStepData("S12_qa", S12OutputSchema, res.data);
-      const all = [...deterministic, ...parsed.issues].map((issue) => ({
-        ...issue,
-        severity: issueSeverity(issue),
-      }));
-      const blocking = blockingIssues(all);
-      const qa = {
-        issues: all,
-        blocking: blocking.length,
-        warnings: all.length - blocking.length,
-      };
-      if (blocking.length) {
-        throw new PipelineQualityError(
-          `QA blockiert den Export: ${blocking.length} schwerwiegende Fehler (${qa.warnings} Hinweise).`,
-          qa,
-          { qa },
-        );
-      }
-      return {
-        output: qa,
-        context: { qa },
-
-        model: res.model,
-        promptSnapshot: res.promptSnapshot,
-        tokensIn: res.tokensIn,
-        tokensOut: res.tokensOut,
-      };
-    }
-
-    case "S13_export": {
-      const source = requireSource(ctx);
-      const broken = ctx.brokenLinks ?? [];
-      const bodyText = (ctx.content ?? []).map((c) => c.markdown).join("\n\n");
-      const exactTables = checkExactTables(bodyText, ctx.tables ?? []);
-      if (!exactTables.ok) {
-        throw new Error(
-          `Tabellenprüfung fehlgeschlagen: fehlend ${exactTables.missing.map((i) => i + 1).join(", ") || "keine"}, doppelt ${exactTables.duplicated.map((i) => i + 1).join(", ") || "keine"}, fremd ${exactTables.foreign}. Bitte S10 und S11 erneut ausführen.`,
-        );
-      }
-      const targetWords = bodyText.split(/\s+/).filter(Boolean).length;
-      const readingMinutes = Math.max(1, Math.round(targetWords / 200));
-      // H1 nur ergänzen, wenn der Content selbst keine H1 enthält (#3).
-      const hasH1 = /^#\s+\S/m.test(bodyText);
-      const md = [
-        hasH1 ? "" : `# ${headline(ctx.slug?.term_translated ?? source.h1 ?? "")}`,
-        "",
-        `> Quelle: ${source.url}`,
-        `> Wortzahl (Ziel): ${targetWords} · Lesezeit: ${readingMinutes} Min.`,
-        `> Zielstatus: ${ctx.target?.status ?? "-"}${ctx.target?.url ? ` (${ctx.target.url})` : ""}`,
-        ctx.target?.resolution_method ? `> Zielermittlung: ${ctx.target.resolution_method}` : "",
-        ctx.target?.hreflang_hint ? `> hreflang-Hinweis: ${ctx.target.hreflang_hint}` : "",
-        ctx.linkPool
-          ? `> Link-Pool: ${ctx.linkPool.entries.length} Links aus ${ctx.linkPool.fetches.length} Abrufen` +
-            (ctx.linkPool.hub_url ? ` (Hub: ${ctx.linkPool.hub_url})` : "")
-          : "",
-        "",
-        ...(ctx.content ?? []).map((c) => c.markdown),
-        "",
-        "## Verifizierte Links",
-        ...(ctx.verifiedLinks ?? []).map(
-          (l) => `- [${l.anchor}](${l.target_url}) — HTTP ${l.http_status}`,
-        ),
-        "",
-        broken.length
-          ? `## Verworfene Poolkandidaten\n${broken
-              .map((b) => `- ${b.anchor}: ${b.url} — ${b.reason}`)
-              .join("\n")}`
-          : "",
-        market.closing_note ? `\n${market.closing_note}` : "",
-      ]
-        .filter((l) => l !== "")
-        .join("\n");
-      return {
-        output: { length: md.length, broken: broken.length },
-        context: { exportMarkdown: md },
+        ...(res.stats.model ? { model: res.stats.model } : {}),
+        ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
+        tokensIn: res.stats.tokensIn,
+        tokensOut: res.stats.tokensOut,
       };
     }
 
@@ -1923,59 +243,40 @@ export async function runStep(
   }
 }
 
+/** Schritte ab (inkl.) `stepKey` – deren Kontextergebnisse werden beim Neulauf ungültig. */
+function stepsFrom(stepKey: StepKey): StepKey[] {
+  const idx = PIPELINE.findIndex((s) => s.key === stepKey);
+  return PIPELINE.slice(Math.max(idx, 0)).map((s) => s.key);
+}
+
 /**
- * Erzwingt die Überschriftenebene aus dem Quelldokument (#3):
- * Die erste Überschrift im Abschnitt bekommt exakt so viele Rauten wie die
- * deutsche Vorlage; fehlt sie, wird sie ergänzt.
+ * Kontext für einen Lauf von `stepKey`: Ergebnisse dieses und aller späteren
+ * Schritte entfallen. Bei `extract` wird der Kontext komplett neu aufgebaut
+ * (auch Altjobs der früheren Pipeline).
  */
-export function enforceHeadingLevel(md: string, level: number, heading: string): string {
-  const hashes = "#".repeat(Math.min(3, Math.max(1, level)));
-  const lines = md.split("\n");
-  const idx = lines.findIndex((l) => /^\s*#{1,6}\s+\S/.test(l));
-  if (idx === -1) return `${hashes} ${heading}\n\n${md}`.trim();
-  lines[idx] = `${hashes} ${heading}`;
-  return lines.join("\n");
-}
-
-/** H1 nie als Slug ausgeben: Bindestriche auflösen, ersten Buchstaben groß. */
-function headline(raw: string): string {
-  const text = raw.trim().replace(/[-_]+/g, " ").replace(/\s+/g, " ");
-  if (!text) return "";
-  return text.charAt(0).toUpperCase() + text.slice(1);
-}
-
-/** Satz eines Abschnitts mit der höchsten Wortüberschneidung zu anchor + search_terms. */
-function bestSentenceInSection(sectionText: string, anchor: string, searchTerms: string[]): string {
-  const sentences = sectionText
-    .split(/(?<=[.!?;])\s+/)
-    .map((s) => s.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
-  if (!sentences.length) return "";
-  const want = [anchor, ...(searchTerms ?? [])].join(" ").toLowerCase();
-  const wantTokens = new Set(
-    want
-      .split(/\s+/)
-      .map((t) => t.replace(/[^a-z0-9äöüß]/gi, ""))
-      .filter((t) => t.length > 2),
-  );
-  if (!wantTokens.size) return sentences[0]!.slice(0, 300);
-  let best = sentences[0]!;
-  let bestScore = -1;
-  for (const s of sentences) {
-    const st = s.toLowerCase();
-    let score = 0;
-    for (const t of wantTokens) if (st.includes(t)) score++;
-    if (score > bestScore) {
-      bestScore = score;
-      best = s;
+function contextBefore(context: JobContext, stepKey: StepKey): JobContext {
+  if (stepKey === "extract") return {};
+  const drop = new Set(stepsFrom(stepKey).flatMap((k) => STEP_CONTEXT_KEYS[k]));
+  const out: JobContext = {};
+  for (const def of PIPELINE) {
+    for (const key of STEP_CONTEXT_KEYS[def.key]) {
+      if (!drop.has(key) && context[key] !== undefined) {
+        (out as Record<string, unknown>)[key] = context[key];
+      }
     }
   }
-  return best.slice(0, 300);
+  return out;
 }
 
-function requireSource(ctx: JobContext) {
-  if (!ctx.source) throw new Error("Schritt S1 muss zuerst laufen.");
-  return ctx.source;
+/** Spätere Schritte auf „pending“ setzen, weil ihre Grundlage neu berechnet wurde. */
+async function resetLaterSteps(jobId: string, stepKey: StepKey) {
+  const later = stepsFrom(stepKey).filter((k) => k !== stepKey);
+  if (!later.length) return;
+  await supabaseAdmin
+    .from("job_steps")
+    .update({ status: "pending", error: null, updated_at: new Date().toISOString() })
+    .eq("job_id", jobId)
+    .in("step_key", later);
 }
 
 /** Führt einen Schritt aus, persistiert Status/Kontext idempotent. */
@@ -1989,10 +290,10 @@ export async function executeStep(jobId: string, stepKey: string) {
     .eq("id", jobId)
     .maybeSingle();
   if (error || !job) throw new Error("Job nicht gefunden.");
-  const market = (job as unknown as { markets: MarketRow }).markets;
+  const marketRow = (job as unknown as { markets: MarketRow }).markets;
+  const market = toMarketProfile(marketRow);
   const context = ((job as { context?: JobContext }).context ?? {}) as JobContext;
 
-  // P2-1: Voraussetzungen prüfen, bevor irgendetwas läuft.
   const blocker = dependencyBlocker(def.key, context);
   if (blocker) {
     await upsertStep(jobId, def.key, def.order, {
@@ -2000,7 +301,7 @@ export async function executeStep(jobId: string, stepKey: string) {
       error: blocker,
       output: null,
     });
-    await syncJobStatus(jobId);
+    await syncJobStatus(jobId, context);
     return { ok: false as const, error: blocker, blocked: true as const };
   }
 
@@ -2010,13 +311,20 @@ export async function executeStep(jobId: string, stepKey: string) {
     error: null,
     input: describeStepInput(def.key, context, market, job.source_url) as never,
   });
-  await supabaseAdmin.from("jobs").update({ current_step: def.key, status: "running" }).eq("id", jobId);
+  await supabaseAdmin
+    .from("jobs")
+    .update({ current_step: def.key, status: "running" })
+    .eq("id", jobId);
 
   startVarRecording();
   try {
-    const result = await runStep(stepKey, { id: jobId, source_url: job.source_url, context }, market);
+    const result = await runStep(
+      def.key,
+      { id: jobId, source_url: job.source_url, context },
+      market,
+    );
     const recordedVars = collectRecordedVars();
-    const nextContext = { ...context, ...result.context };
+    const nextContext: JobContext = { ...contextBefore(context, def.key), ...result.context };
     await supabaseAdmin
       .from("jobs")
       .update({
@@ -2036,46 +344,62 @@ export async function executeStep(jobId: string, stepKey: string) {
       ...(result.promptSnapshot ? { prompt_snapshot: result.promptSnapshot } : {}),
       prompt_vars: (recordedVars.length ? recordedVars : null) as never,
     });
-    await syncJobStatus(jobId);
+    await resetLaterSteps(jobId, def.key);
+    await syncJobStatus(jobId, nextContext);
     return { ok: true as const, output: result.output };
   } catch (err) {
-    collectRecordedVars();
+    const recordedVars = collectRecordedVars();
     const message = err instanceof Error ? err.message : "Unbekannter Fehler";
-    if (err instanceof PipelineQualityError) {
-      const failedContext = { ...context, ...err.context };
+    // Ergebnisse dieses und späterer Schritte sind ungültig (außer bei extract:
+    // dort bleibt der bisherige Stand inkl. Altjob-Export erhalten).
+    const failedContext = def.key === "extract" ? context : contextBefore(context, def.key);
+    if (def.key !== "extract") {
       await supabaseAdmin
         .from("jobs")
         .update({ context: failedContext as never, updated_at: new Date().toISOString() })
         .eq("id", jobId);
-      await upsertStep(jobId, def.key, def.order, {
-        status: "error",
-        error: message,
-        output: err.output as never,
-        duration_ms: Date.now() - started,
-      });
-      await syncJobStatus(jobId);
-      return { ok: false as const, error: message };
+      await resetLaterSteps(jobId, def.key);
     }
+    const quality = err instanceof PipelineQualityError ? err : null;
     await upsertStep(jobId, def.key, def.order, {
       status: "error",
       error: message,
+      output: (quality?.output ?? null) as never,
       duration_ms: Date.now() - started,
+      ...(quality?.stats.model ? { model: quality.stats.model } : {}),
+      ...(quality?.stats.promptSnapshot ? { prompt_snapshot: quality.stats.promptSnapshot } : {}),
+      ...(quality
+        ? { tokens_in: quality.stats.tokensIn ?? 0, tokens_out: quality.stats.tokensOut ?? 0 }
+        : {}),
+      prompt_vars: (recordedVars.length ? recordedVars : null) as never,
     });
-    await syncJobStatus(jobId);
+    await syncJobStatus(jobId, failedContext);
     return { ok: false as const, error: message };
   }
 }
 
-/** Job gilt nur ohne Fehler und ohne blockierte Schritte als „done" (P2-1). */
-async function syncJobStatus(jobId: string) {
+/**
+ * Job-Status aus den Schritten der aktuellen Pipeline (Altschritte werden ignoriert):
+ * `done` ohne Fehler/Warnungen, `done_with_errors` bei offenen Warnungen.
+ */
+async function syncJobStatus(jobId: string, ctx: JobContext) {
   const { data: steps } = await supabaseAdmin
     .from("job_steps")
     .select("step_key,status")
     .eq("job_id", jobId);
-  const rows = (steps ?? []) as Array<{ step_key: string; status: string }>;
+  const rows = ((steps ?? []) as Array<{ step_key: string; status: string }>).filter(
+    (s) => STEP_BY_KEY[s.step_key],
+  );
   const problems = rows.filter((s) => s.status === "error" || s.status === "blocked").length;
-  const finished = rows.find((s) => s.step_key === "S13_export")?.status === "done";
-  const status = finished ? (problems ? "done_with_errors" : "done") : problems ? "error" : "idle";
+  const finished = rows.find((s) => s.step_key === "review")?.status === "done";
+  const warnings = ctx.review?.warnings?.length ?? 0;
+  const status = finished
+    ? problems || warnings
+      ? "done_with_errors"
+      : "done"
+    : problems
+      ? "error"
+      : "idle";
   await supabaseAdmin
     .from("jobs")
     .update({ status, updated_at: new Date().toISOString() })
@@ -2100,6 +424,7 @@ async function upsertStep(
       .from("job_steps")
       .update({
         ...patch,
+        step_order: order,
         updated_at: new Date().toISOString(),
         run_count: counts ? (existing.run_count ?? 0) + 1 : existing.run_count,
       } as never)
@@ -2117,133 +442,38 @@ async function upsertStep(
 
 /**
  * Kompakter Snapshot dessen, was ein Schritt als Eingabe erhalten hat.
- * NUR für die Anzeige – der an das Modell gesendete Payload wird in runStep
- * separat und ungekürzt gebaut (P0-1).
+ * NUR für die Anzeige – der Modell-Payload wird in runStep ungekürzt gebaut.
  */
 function describeStepInput(
   stepKey: string,
   ctx: JobContext,
-  market: MarketRow,
+  market: MarketProfile,
   sourceUrl: string,
 ): Record<string, unknown> {
-  const marketInfo = {
-    country: market.country,
-    language: market.language,
-    locale: market.locale,
-    domain: market.domain,
-    brand: market.brand,
-    magazine_root: market.magazine_root,
-    path_map: market.path_map,
-  };
-  const clip = (s: string | null | undefined, n = 1500) =>
-    s ? (s.length > n ? `${s.slice(0, n)}… [gekürzt]` : s) : null;
-
+  const marketInfo = marketPromptProfile(market);
   switch (stepKey) {
-    case "S1_extract_source":
-      return { source_url: sourceUrl, market: marketInfo };
-    case "S2_resolve_slug":
+    case "extract":
+      return { source_url: sourceUrl };
+    case "scan":
       return {
         market: marketInfo,
-        term: lastPathSegment(sourceUrl),
-        h1: ctx.source?.h1 ?? null,
-        hreflang: ctx.source?.hreflang ?? [],
+        block_count: ctx.source?.blocks.length ?? 0,
+        word_count: ctx.source?.wordCount ?? 0,
+        outline: outlineOf(ctx.source?.blocks ?? []),
       };
-    case "S3_target_status":
+    case "localize":
       return {
         market: marketInfo,
-        slug: ctx.slug,
-        hreflang_target_url: ctx.hreflangTargetUrl ?? null,
+        block_count: ctx.source?.blocks.length ?? 0,
+        word_count: ctx.source?.wordCount ?? 0,
+        findings: ctx.findings ?? [],
       };
-    case "S4_compare":
-      return {
-        de_outline: clip(ctx.source?.outline),
-        de_word_count: ctx.source?.wordCount,
-        target_status: ctx.target?.status,
-        target_url: ctx.target?.url,
-        target_outline: clip(ctx.target?.doc?.outline ?? null),
-      };
-    case "S7a_link_pool":
+    case "review":
       return {
         market: marketInfo,
-        source_url: ctx.source?.url ?? null,
-        hub_candidates: ctx.linkPool?.hub_url ?? null,
-      };
-    case "S7b_serp_gap":
-      return {
-        market: marketInfo,
-        topic: ctx.source?.h1 ?? ctx.source?.title ?? null,
-        pool_size: ctx.linkPool?.entries.length ?? 0,
-        content_links: ctx.source?.contentLinks?.length ?? 0,
-      };
-    case "S7c_serp_opportunities":
-      return {
-        market: marketInfo,
-        topic: ctx.source?.h1 ?? ctx.source?.title ?? null,
-        pool_size: ctx.linkPool?.entries.length ?? 0,
-        previous_serp_queries: ctx.serpGap?.queries ?? [],
-        sections: ctx.source?.sections.map((s) => s.heading) ?? [],
-      };
-
-    case "S5_style_profile":
-      return {
-        market: marketInfo,
-        content_type: "magazine",
-        sibling_urls: (ctx.linkPool?.siblings ?? []).map((s) => s.url),
-      };
-    case "S6_localization_plan":
-      return {
-        market: marketInfo,
-        institutions: market.institutions,
-        forbidden_claims: market.forbidden_claims,
-        de_sections: ctx.source?.sections.map((s) => s.heading),
-      };
-    case "S7_link_candidates":
-      return {
-        market: marketInfo,
-        anchors: (ctx.plan?.sections ?? []).flatMap((s) => s.anchors ?? []),
-        pool_size: ctx.linkPool?.entries.length ?? 0,
-        search_runs: ctx.linkSearchLog?.length ?? 0,
-      };
-    case "S8_link_select":
-      return { candidates: ctx.linkCandidates };
-    case "S9_link_verify":
-      return { selection: ctx.linkSelection };
-    case "S10_localize_tables":
-      return {
-        market: marketInfo,
-        tables: (ctx.source?.tables ?? []).map((t) => ({
-          index: t.index,
-          preview: clip(t.markdown, 400),
-        })),
-      };
-    case "S11_generate_content":
-      return {
-        market: marketInfo,
-        plan_sections: (ctx.plan?.sections ?? []).map((s) => ({
-          de_heading: s.de_heading,
-          target_heading: s.target_heading,
-          action: s.action,
-          notes: s.notes,
-          has_table: s.has_table,
-          de_body_chars: (ctx.source?.sections.find((x) => x.heading === s.de_heading)?.text ?? "")
-            .length,
-        })),
-        verified_links: ctx.verifiedLinks?.map((l) => l.target_url),
-        localized_tables: ctx.tables?.length ?? 0,
-        style_profile_present: Boolean(ctx.styleProfile),
-      };
-    case "S12_qa":
-      return {
-        market: marketInfo,
-        forbidden_claims: market.forbidden_claims,
-        content_sections: (ctx.content ?? []).map((c) => c.heading),
-        word_count: (ctx.content ?? []).map((c) => c.markdown).join(" ").split(/\s+/).length,
-      };
-    case "S13_export":
-      return {
-        headings: (ctx.content ?? []).map((c) => c.heading),
-        verified_links: ctx.verifiedLinks?.length ?? 0,
-        target_status: ctx.target?.status,
+        findings: ctx.findings?.length ?? 0,
+        localized_blocks: ctx.localized?.blocks.length ?? 0,
+        removed_blocks: ctx.localized?.blocks.filter((b) => b.removed).map((b) => b.id) ?? [],
       };
     default:
       return {};

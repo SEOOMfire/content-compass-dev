@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
-import { PIPELINE, STEP_BY_KEY, type JobContext } from "./types";
+import { isLegacyContext, PIPELINE, STEP_BY_KEY, type JobContext } from "./types";
 
 function truncate(s: string, max = 6000): string {
   return s.length > max ? `${s.slice(0, max)}\n… [gekürzt, ${s.length} Zeichen gesamt]` : s;
@@ -19,10 +19,8 @@ function ms(v: number | null | undefined): string {
   return v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${v} ms`;
 }
 
-/** Steht die URL als Markdown-Link im Text? */
-function linkInText(text: string, url: string): boolean {
-  const escaped = url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`\\]\\(\\s*${escaped}[^)]*\\)`).test(text);
+function cell(s: string | null | undefined): string {
+  return (s ?? "—").replace(/\|/g, "\\|").replace(/\s+/g, " ").trim() || "—";
 }
 
 /** Baut den vollständigen Prozess-Report eines Jobs als Markdown. */
@@ -39,11 +37,6 @@ export async function buildJobReport(jobId: string): Promise<{ filename: string;
     .select("*")
     .eq("job_id", jobId)
     .order("step_order");
-
-  const { data: links } = await supabaseAdmin
-    .from("verified_links")
-    .select("anchor,target_url,http_status,canonical_ok,confidence")
-    .eq("job_id", jobId);
 
   const market = (job as unknown as {
     markets: { country?: string; language?: string; locale?: string; domain?: string; brand?: string } | null;
@@ -68,15 +61,7 @@ export async function buildJobReport(jobId: string): Promise<{ filename: string;
     prompt_snapshot: string | null;
     error: string | null;
   };
-  type LinkRow = {
-    anchor: string;
-    target_url: string;
-    http_status: number | null;
-    canonical_ok: boolean | null;
-    confidence: string | null;
-  };
   const rows = (steps ?? []) as unknown as StepRow[];
-  const linkRows = (links ?? []) as unknown as LinkRow[];
   const byKey = new Map(rows.map((s) => [s.step_key, s]));
 
   const out: string[] = [];
@@ -85,7 +70,9 @@ export async function buildJobReport(jobId: string): Promise<{ filename: string;
   out.push(`- **Job-ID:** \`${jobRow.id}\``);
   out.push(`- **Zielmarkt:** ${market?.country ?? "—"} · ${market?.language ?? "—"} · ${market?.domain ?? "—"}`);
   out.push(`- **Job-Status:** ${jobRow.status}${jobRow.current_step ? ` (aktueller Schritt: ${jobRow.current_step})` : ""}`);
-  out.push(`- **Zielstatus:** ${ctx.target?.status ?? "—"}${ctx.target?.url ? ` (${ctx.target.url})` : ""}`);
+  if (isLegacyContext(ctx)) {
+    out.push("- **Hinweis:** Altjob aus der früheren Pipeline – „Komplett ausführen“ erzeugt ihn neu.");
+  }
   out.push(`- **Erstellt:** ${jobRow.created_at} · **Aktualisiert:** ${jobRow.updated_at ?? "—"}`);
   out.push(`- **Report erzeugt:** ${new Date().toISOString()}`);
   out.push("");
@@ -137,53 +124,41 @@ export async function buildJobReport(jobId: string): Promise<{ filename: string;
     }
   }
 
-  out.push("## Verifizierte Links");
+  out.push("## DE-Bezüge (Schritt 2)");
   out.push("");
-  if (!linkRows.length) {
-    out.push("_Keine verifizierten Links._");
+  const findings = ctx.findings ?? [];
+  if (!findings.length) {
+    out.push("_Keine Funde._");
   } else {
-    out.push("| Anker | Ziel-URL | HTTP | Canonical OK | Konfidenz |");
-    out.push("| --- | --- | --- | --- | --- |");
-    for (const l of linkRows) {
+    out.push("| ID | Blöcke | DE-Verweis | Kategorie | Entscheidung | Ersatz | Anweisung |");
+    out.push("| --- | --- | --- | --- | --- | --- | --- |");
+    for (const f of findings) {
       out.push(
-        `| ${l.anchor} | ${l.target_url} | ${l.http_status} | ${l.canonical_ok ? "ja" : "nein"} | ${l.confidence ?? "—"} |`,
+        `| ${f.id} | ${f.block_ids.join(", ")} | ${cell(f.de_reference)} | ${f.category} | ${f.decision} | ${cell(f.target_equivalent)} | ${cell(f.instruction)} |`,
       );
     }
   }
   out.push("");
 
-  out.push("## Link-Trichter");
+  out.push("## Prüfung (Schritt 4)");
   out.push("");
-  out.push("| Anker | Origin | Abschnitt | Kandidaten | Gewählt | Reason | Verifiziert | Im Text |");
-  out.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
-  const funnelAnchors: { anchor: string; origin: string; section: string }[] = [];
-  for (const s of ctx.plan?.sections ?? []) {
-    for (const a of s.anchors ?? []) funnelAnchors.push({
-      anchor: a.anchor,
-      origin: (a as { origin?: string }).origin ?? "plan",
-      section: s.de_heading,
-    });
+  const issues = ctx.review?.issues ?? [];
+  if (!issues.length) {
+    out.push(ctx.review ? "_Keine Befunde._" : "_Noch nicht geprüft._");
+  } else {
+    out.push("| Block | Herkunft | Befund | Status | Hinweis |");
+    out.push("| --- | --- | --- | --- | --- |");
+    for (const i of issues) {
+      out.push(`| ${i.block_id ?? "Dokument"} | ${i.origin} | ${cell(i.problem)} | ${i.status} | ${cell(i.note)} |`);
+    }
   }
-  const bodyMarkdown = (ctx.content ?? []).map((c) => c.markdown).join("\n\n");
-  for (const fa of funnelAnchors) {
-    const cand = ctx.linkCandidates?.[fa.anchor]?.length ?? 0;
-    const sel = ctx.linkSelection?.find((x) => x.anchor === fa.anchor);
-    const chosen = sel?.url ?? null;
-    const reason = (sel as { reason?: string } | undefined)?.reason ?? "";
-    const verified = chosen && ctx.verifiedLinks?.some((v) => v.target_url === chosen) ? "ja" : chosen ? "nein" : "—";
-    const inText = chosen && linkInText(bodyMarkdown, chosen) ? "ja" : chosen ? "nein" : "—";
-    out.push(
-      `| ${fa.anchor} | ${fa.origin} | ${fa.section} | ${cand} | ${chosen ?? "null"} | ${reason} | ${verified} | ${inText} |`,
-    );
-  }
-  if (!funnelAnchors.length) out.push("_Keine Anker vorhanden._");
   out.push("");
 
   out.push("## Job-Kontext (Endstand)");
   out.push(json(ctx, 20000));
   out.push("");
 
-  out.push("## Export-Markdown (S13)");
+  out.push("## Export-Markdown");
   out.push("");
   out.push(ctx.exportMarkdown ? "```markdown\n" + ctx.exportMarkdown + "\n```" : "_Noch kein Export vorhanden._");
   out.push("");

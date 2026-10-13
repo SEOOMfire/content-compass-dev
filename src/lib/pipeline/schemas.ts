@@ -1,61 +1,76 @@
 import { z } from "zod";
+import { FINDING_CATEGORIES, FINDING_DECISIONS } from "./types";
 
-/** Verbindliches Aktionsvokabular (P2-3). */
-export const PLAN_ACTIONS = ["uebersetzen", "lokalisieren", "umschreiben", "streichen"] as const;
-export type PlanAction = (typeof PLAN_ACTIONS)[number];
+/** Zelle/Text: Zahlen werden als Text übernommen. */
+const TextSchema = z.union([z.string(), z.number()]).transform((v) => String(v));
 
-export const AnchorSchema = z.object({
-  anchor: z.string().min(1),
-  intent: z.string().default(""),
-  search_terms: z.array(z.string().min(1)).default([]),
-  path_type: z.string().optional(),
-  origin: z.enum(["source_link", "plan"]).optional(),
-  source_url: z.string().url().nullable().optional(),
+/** Listenpunkt: als String oder { text, children }. */
+export type ListItemInput =
+  string | { text?: string | number | undefined; children?: ListItemInput[] | undefined };
+
+export const ListItemInputSchema: z.ZodType<ListItemInput> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.object({
+      text: z.union([z.string(), z.number()]).optional(),
+      children: z.array(ListItemInputSchema).optional(),
+    }),
+  ]),
+);
+
+export const FindingInputSchema = z.object({
+  id: z.string().optional(),
+  block_ids: z.array(z.string()).default([]),
+  de_reference: z.string().min(1),
+  category: z.enum(FINDING_CATEGORIES).catch("sonstiges"),
+  decision: z.enum(FINDING_DECISIONS).catch("neutral"),
+  target_equivalent: z.string().nullable().optional(),
+  instruction: z.string().default(""),
 });
 
-export const PlanSectionSchema = z.object({
-  de_heading: z.string().min(1),
-  target_heading: z.string().min(1),
-  action: z.enum(PLAN_ACTIONS),
-  notes: z.array(z.string()).default([]),
-  has_table: z.boolean().default(false),
-  anchors: z.array(AnchorSchema).default([]),
+/** Schritt 2 · localization_scan */
+export const ScanOutputSchema = z.object({
+  findings: z.array(FindingInputSchema).default([]),
 });
 
-/** S2 – kanonisches Ausgabeschema. */
-export const S2OutputSchema = z.object({
-  term_translated: z.string().min(1),
-  slug_candidates: z.array(z.string().min(1)).min(1),
+export const BlockPatchSchema = z.object({
+  id: z.string().min(1),
+  text: TextSchema.optional(),
+  items: z.array(ListItemInputSchema).optional(),
+  rows: z.array(z.array(TextSchema)).optional(),
+  removed: z.boolean().optional(),
+});
+export type BlockPatch = z.output<typeof BlockPatchSchema>;
+
+export const MetaInputSchema = z.object({
+  title: z.string().optional(),
+  meta_description: z.string().optional(),
+  slug: z.string().optional(),
 });
 
-/** S6 – Plan inkl. Anker. */
-export const S6OutputSchema = z.object({
-  sections: z.array(PlanSectionSchema).min(1),
+/** Schritt 3 · localize_document */
+export const LocalizeOutputSchema = z.object({
+  meta: MetaInputSchema.nullable().optional(),
+  blocks: z.array(BlockPatchSchema).default([]),
 });
 
-/** S8 – nur Kandidatennummern, niemals URLs. */
-export const S8OutputSchema = z.object({
-  choice: z.number().int().nullable().optional(),
-  candidate_index: z.number().int().nullable().optional(),
-  confidence: z.string().optional(),
-  reason: z.string().optional(),
+export const ReviewFixSchema = z.object({
+  text: TextSchema.optional(),
+  items: z.array(ListItemInputSchema).optional(),
+  rows: z.array(z.array(TextSchema)).optional(),
 });
 
-/** S10 – lokalisierte Tabelle als Markdown. */
-export const S10OutputSchema = z.object({
-  table_markdown: z.string().min(1),
-});
-
-export const QaIssueSchema = z.object({
-  type: z.string().min(1),
-  location: z.string().default(""),
-  found: z.string().min(1),
-  suggestion: z.string().default(""),
-});
-
-/** S12 – jeder Befund muss strukturiert und auswertbar sein. */
-export const S12OutputSchema = z.object({
-  issues: z.array(QaIssueSchema).default([]),
+/** Schritt 4 · localization_review */
+export const ReviewOutputSchema = z.object({
+  issues: z
+    .array(
+      z.object({
+        block_id: z.string().nullable().optional(),
+        problem: z.string().min(1),
+        fix: ReviewFixSchema.nullable().optional(),
+      }),
+    )
+    .default([]),
 });
 
 export class StepSchemaError extends Error {}

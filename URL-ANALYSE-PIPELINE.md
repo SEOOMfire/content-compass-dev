@@ -1,5 +1,10 @@
 # URL-Analyse-Pipeline – Vollständige Dokumentation
 
+> **VERALTET (Oktober 2026).** Dieses Dokument beschreibt die frühere 16-Schritt-Pipeline
+> (S1–S13 inkl. Link-Pool, SERP, Stilprofil). Sie wurde durch die 4-Schritt-Pipeline
+> `extract` → `scan` → `localize` → `review` ersetzt. Aktuelle Beschreibung:
+> [`docs/pipeline/pipeline.md`](docs/pipeline/pipeline.md).
+
 Dieses Dokument beschreibt die **komplette Pipeline**, die abläuft, wenn ein Nutzer eine
 deutsche URL analysieren (lokalisieren) lässt. Es beantwortet für jeden Schritt:
 

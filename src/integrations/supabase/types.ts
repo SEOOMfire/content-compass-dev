@@ -244,6 +244,7 @@ export type Database = {
           language: string
           language_variant: string
           locale: string | null
+          localization_notes: string | null
           magazine_root: string
           path_map: Json
           path_prefix: string
@@ -266,6 +267,7 @@ export type Database = {
           language: string
           language_variant?: string
           locale?: string | null
+          localization_notes?: string | null
           magazine_root?: string
           path_map?: Json
           path_prefix?: string
@@ -288,6 +290,7 @@ export type Database = {
           language?: string
           language_variant?: string
           locale?: string | null
+          localization_notes?: string | null
           magazine_root?: string
           path_map?: Json
           path_prefix?: string

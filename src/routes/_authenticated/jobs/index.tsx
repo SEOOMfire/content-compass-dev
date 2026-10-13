@@ -60,11 +60,11 @@ function JobsPage() {
   const [loadingContentId, setLoadingContentId] = useState<string | null>(null);
 
   const markets = useQuery({
-    queryKey: ["markets-with-index"],
+    queryKey: ["markets-active"],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("markets")
-        .select("id,country,language,domain,active,index_last_run")
+        .select("id,country,language,domain,active")
         .eq("active", true)
         .order("country");
       if (error) throw error;
@@ -76,7 +76,6 @@ function JobsPage() {
     id: string;
     country: string;
     language: string;
-    index_last_run: string | null;
   };
   const marketList = (markets.data ?? []) as unknown as MarketOption[];
 
@@ -109,18 +108,20 @@ function JobsPage() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from("job_steps")
-        .select("job_id,status")
+        .select("job_id,step_key,status")
         .in("job_id", runningIds);
       if (error) throw error;
-      return data as { job_id: string; status: string }[];
+      return data as { job_id: string; step_key: string; status: string }[];
     },
   });
 
   function progressOf(job: { id: string; status: string; current_step: string | null }) {
     const total = PIPELINE.length;
     if (job.status === "done") return 100;
-    const rows = (runningSteps.data ?? []).filter((s) => s.job_id === job.id);
-    const done = rows.filter((s) => s.status === "done" || s.status === "done_with_errors").length;
+    const rows = (runningSteps.data ?? []).filter(
+      (s) => s.job_id === job.id && STEP_BY_KEY[s.step_key],
+    );
+    const done = rows.filter((s) => s.status === "done").length;
     if (done > 0) return Math.round((done / total) * 100);
     const order = job.current_step ? (STEP_BY_KEY[job.current_step]?.order ?? 0) - 1 : 0;
     return Math.round((Math.max(order, 0) / total) * 100);
@@ -216,7 +217,8 @@ function JobsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Content-Lokalisierung</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Deutsche Magazin-URL in einen Zielmarkt lokalisieren – in 14 nachvollziehbaren Schritten.
+          Deutsche Magazin-URL strukturtreu in einen Zielmarkt lokalisieren – in {PIPELINE.length}{" "}
+          nachvollziehbaren Schritten.
           <span className="ml-1 text-subtle-fg">Arbeitsbereich: {workspace?.name ?? "—"}</span>
         </p>
       </div>
@@ -293,7 +295,13 @@ function JobsPage() {
                         <span>
                           {(j.markets as { country?: string } | null)?.country ?? "—"}
                         </span>
-                        <Badge variant={j.status === "error" ? "destructive" : "secondary"}>
+                        <Badge
+                          variant={
+                            j.status === "error" || j.status === "done_with_errors"
+                              ? "destructive"
+                              : "secondary"
+                          }
+                        >
                           {j.status}
                         </Badge>
                       </span>
@@ -357,8 +365,8 @@ function JobsPage() {
                         <AlertDialogHeader>
                           <AlertDialogTitle>Job löschen?</AlertDialogTitle>
                           <AlertDialogDescription>
-                            Der Job „{j.source_url}“ und alle zugehörigen Schritte und verifizierten
-                            Links werden dauerhaft entfernt. Das kann nicht rückgängig gemacht werden.
+                            Der Job „{j.source_url}“ und alle zugehörigen Schritte werden dauerhaft
+                            entfernt. Das kann nicht rückgängig gemacht werden.
                           </AlertDialogDescription>
                         </AlertDialogHeader>
                         <AlertDialogFooter>

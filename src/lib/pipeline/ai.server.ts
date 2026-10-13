@@ -106,11 +106,20 @@ async function callChat(
 
 async function gatewayError(res: Response): Promise<Error> {
   let message = `OpenAI-Fehler ${res.status}`;
+  let code = "";
   try {
-    const body = (await res.json()) as { error?: { message?: string }; message?: string };
+    const body = (await res.json()) as {
+      error?: { message?: string; code?: string; type?: string };
+      message?: string;
+    };
     message = body.error?.message ?? body.message ?? message;
+    code = body.error?.code ?? body.error?.type ?? "";
   } catch {
     /* noop */
+  }
+  // OpenAI meldet fehlendes Guthaben als 429 "insufficient_quota" – kein Rate-Limit, Wiederholen sinnlos.
+  if (code === "insufficient_quota" || /no credits|exceeded your current quota/i.test(message)) {
+    return new Error(`OpenAI-Guthaben aufgebraucht. ${message}`);
   }
   if (res.status === 429) return new Error(`Rate-Limit erreicht. ${message}`);
   if (res.status === 402) return new Error(`OpenAI-Guthaben aufgebraucht. ${message}`);

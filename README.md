@@ -1,5 +1,16 @@
 # Content Compass
 
+> **Aktueller Stand (Oktober 2026):** Die Pipeline wurde auf **4 Schritte** vereinfacht
+> (`extract` → `scan` → `localize` → `review`). Aus einer deutschen URL entsteht ein
+> strukturtreues Markdown-Dokument für den Zielmarkt. Interne Verlinkung, Zielseiten-Erkennung,
+> SERP-Analyse (DataForSEO), Websuche (Firecrawl) und Stilprofil sind entfallen; dafür werden
+> keine Zugangsdaten mehr benötigt – nur `OPENAI_API_KEY` (optional `OPENAI_BASE_URL`).
+> Beschreibung: [`docs/pipeline/pipeline.md`](docs/pipeline/pipeline.md), Prompts:
+> [`docs/pipeline/prompts.md`](docs/pipeline/prompts.md). Tests: `bun test`.
+>
+> Der folgende Build-Prompt ist die ursprüngliche Spezifikation und nur noch historisch;
+> die Abschnitte zu Links, Zielstatus, Stilprofil und SERP gelten nicht mehr.
+
 Build-Prompt: Fressnapf Content-Lokalisierungs-Tool
 
 Setze das folgende Projekt im Design des Omfire Budget Buddy um, inkl. Logo.

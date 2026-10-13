@@ -1,23 +1,11 @@
-import type { GapEntry, PoolEntry, SearchLogEntry } from "./pool";
+/**
+ * Datenmodell der vereinfachten Lokalisierungs-Pipeline (4 Schritte).
+ *
+ * Grundprinzip: Der Code besitzt die Struktur (Blockliste mit stabilen IDs),
+ * das Modell liefert nur den Text je Block. Markdown rendert ausschließlich der Code.
+ */
 
-export type StepKey =
-  | "S1_extract_source"
-  | "S2_resolve_slug"
-  | "S3_target_status"
-  | "S4_compare"
-  | "S7a_link_pool"
-  | "S7b_serp_gap"
-  | "S7c_serp_opportunities"
-
-  | "S5_style_profile"
-  | "S6_localization_plan"
-  | "S7_link_candidates"
-  | "S8_link_select"
-  | "S9_link_verify"
-  | "S10_localize_tables"
-  | "S11_generate_content"
-  | "S12_qa"
-  | "S13_export";
+export type StepKey = "extract" | "scan" | "localize" | "review";
 
 export interface StepDef {
   key: StepKey;
@@ -30,322 +18,156 @@ export interface StepDef {
 
 export const PIPELINE: StepDef[] = [
   {
-    key: "S1_extract_source",
+    key: "extract",
     order: 1,
-    label: "S1 · Quelle extrahieren",
-    description: "Deutsche Quell-URL laden, Struktur, Tabellen, Links und hreflang erfassen.",
+    label: "1 · Quelle extrahieren",
+    description:
+      "Deutsche Quell-URL laden und in eine typisierte Blockliste zerlegen (Überschriften, Absätze, Listen, Tabellen, Zitate).",
   },
   {
-    key: "S2_resolve_slug",
+    key: "scan",
     order: 2,
-    label: "S2 · Ziel-Slug ermitteln",
-    promptKey: "resolve_target_slug",
-    description: "Fachbegriff in die Zielsprache übersetzen und Slug-Kandidaten bilden.",
+    label: "2 · DE-Bezüge finden",
+    promptKey: "localization_scan",
+    description:
+      "KI findet deutschlandspezifische Stellen (Behörden, Verbände, Gesetze, Services, Preise …) und entscheidet: ersetzen, neutral oder streichen.",
   },
   {
-    key: "S3_target_status",
+    key: "localize",
     order: 3,
-    label: "S3 · Zielstatus prüfen",
+    label: "3 · Lokalisieren",
+    promptKey: "localize_document",
     description:
-      "EXISTS / VERIFIED_404 / NOT_IN_INDEX über hreflang, Hub-Liste und Live-Abruf bestimmen.",
+      "KI übersetzt Block für Block und wendet die Funde an. Der Code prüft jede Antwort und fragt fehlerhafte Blöcke gezielt erneut an.",
   },
   {
-    key: "S4_compare",
+    key: "review",
     order: 4,
-    label: "S4 · Abgleich",
-    promptKey: "compare",
-    description: "Vorhandenen Zielinhalt mit der deutschen Quelle vergleichen (Lücken).",
-  },
-  {
-    key: "S7a_link_pool",
-    order: 5,
-    label: "S7a · Link-Pool aufbauen",
+    label: "4 · Prüfen & Export",
+    promptKey: "localization_review",
     description:
-      "Hub-Seite, Navigation und Geschwisterartikel des Zielmarkts abrufen (max. 8 Abrufe).",
-  },
-  {
-    key: "S7b_serp_gap",
-    order: 6,
-    label: "S7b · SERP-Lückenanalyse",
-    promptKey: "serp_gap_queries",
-    description:
-      "KI formuliert bis zu 5 site-beschränkte Suchanfragen (DataForSEO, 1. Seite) und übernimmt nur nützliche Treffer in den Pool.",
-  },
-  {
-    key: "S7c_serp_opportunities",
-    order: 7,
-    label: "S7c · SERP-Linkchancen",
-    promptKey: "serp_opportunity_queries",
-    description:
-      "KI leitet aus dem Quelltext bis zu 10 zusätzliche Linkchancen ab und sucht sie per DataForSEO auf der Zieldomain (inkl. Sprachverzeichnis).",
-  },
-  {
-    key: "S5_style_profile",
-    order: 8,
-    label: "S5 · Stilprofil",
-    promptKey: "style_profile",
-    description: "Stilprofil aus den Geschwisterartikeln des Link-Pools ableiten (gecached).",
-  },
-  {
-    key: "S6_localization_plan",
-    order: 9,
-    label: "S6 · Lokalisierungsplan",
-    promptKey: "localization_plan",
-    description: "Abschnittsweiser Plan mit Aktion (keep/adapt/replace/drop) je Abschnitt.",
-  },
-  {
-    key: "S7_link_candidates",
-    order: 10,
-    label: "S7 · Linkkandidaten",
-    description: "Zweistufig: Retrieval im Link-Pool, danach gezielte Site-Suche für Lücken.",
-  },
-  {
-    key: "S8_link_select",
-    order: 11,
-    label: "S8 · Linkauswahl",
-    promptKey: "link_select",
-    description: "LLM wählt nur aus Kandidatennummern – niemals freie URLs.",
-  },
-  {
-    key: "S9_link_verify",
-    order: 12,
-    label: "S9 · Linkprüfung",
-    description: "Jede ausgewählte URL per GET prüfen: 200, Canonical, kein Soft-404.",
-  },
-  {
-    key: "S10_localize_tables",
-    order: 13,
-    label: "S10 · Tabellen lokalisieren",
-    promptKey: "localize_table",
-    description: "Tabellen übersetzen und Einheiten/Normen an den Zielmarkt anpassen.",
-  },
-  {
-    key: "S11_generate_content",
-    order: 14,
-    label: "S11 · Content erzeugen",
-    promptKey: "generate_content",
-    description: "Abschnittsweise Texterzeugung mit Stilprofil und verifizierten Links.",
-  },
-  {
-    key: "S12_qa",
-    order: 15,
-    label: "S12 · QA",
-    promptKey: "qa",
-    description: "Sprach-, Marken- und Claim-Prüfung des Gesamttexts.",
-  },
-  {
-    key: "S13_export",
-    order: 16,
-    label: "S13 · Export",
-    description: "Markdown-Export inklusive Metadaten und Linkliste.",
+      "Code-Prüfungen plus KI-Review mit Korrekturen, danach strukturtreues Markdown rendern.",
   },
 ];
-
 
 export const STEP_BY_KEY: Record<string, StepDef> = Object.fromEntries(
   PIPELINE.map((s) => [s.key, s]),
 );
 
-export type TargetStatus = "EXISTS" | "VERIFIED_404" | "NOT_IN_INDEX";
+/** Inline-Markdown: nur **fett** und *kursiv*. Links werden zu reinem Ankertext. */
+export type Inline = string;
 
-export interface SourceTable {
-  index: number;
-  markdown: string;
-  caption?: string;
-  /** Überschrift des Abschnitts, in dem die Tabelle im Original steht. */
-  section_heading?: string;
+export type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
+
+export interface ListItem {
+  text: Inline;
+  /** Verschachtelte Unterliste (bleibt erhalten). */
+  children?: ListItem[];
+  /** Unterliste nummeriert? Fehlt = Aufzählung. */
+  childrenOrdered?: boolean;
 }
 
-/** Ein interner Link im Fließtext der Quellseite, inkl. Fundstelle. */
-export interface ContentLink {
-  url: string;
-  anchor: string;
-  /** Überschrift des Abschnitts, in dem der Link steht. */
-  section_heading?: string;
-  /** Vollständiger Satz, in dem der Link steht (Klartext, max. 300 Zeichen). */
-  sentence?: string;
-  /** Reiner Linktext ohne Teaser-/Beschreibungstext (max. 8 Wörter). */
-  anchor_clean?: string;
-  /** "inline" = Fließtext, "teaser" = Kachel-/Teaser-Block. */
-  kind?: "inline" | "teaser";
-}
+export type Block =
+  | { id: string; type: "heading"; level: HeadingLevel; text: Inline }
+  | { id: string; type: "paragraph"; text: Inline }
+  | { id: string; type: "list"; ordered: boolean; items: ListItem[] }
+  | { id: string; type: "table"; hasHeader: boolean; rows: Inline[][] }
+  | { id: string; type: "quote"; text: Inline };
 
-export interface SourceSection {
-  heading: string;
-  level: number;
-  text: string;
+export type BlockType = Block["type"];
+
+/** Lokalisierter Block: gleiche ID, gleicher Typ, neuer Inhalt; ggf. gestrichen. */
+export type LocalizedBlock = Block & { removed?: boolean };
+
+export const FINDING_CATEGORIES = [
+  "behoerde",
+  "gesetz",
+  "organisation",
+  "service",
+  "zahl_einheit",
+  "waehrung",
+  "angebot",
+  "quelle",
+  "sonstiges",
+] as const;
+export type FindingCategory = (typeof FINDING_CATEGORIES)[number];
+
+export const FINDING_DECISIONS = ["ersetzen", "neutral", "streichen"] as const;
+export type FindingDecision = (typeof FINDING_DECISIONS)[number];
+
+export interface Finding {
+  id: string;
+  block_ids: string[];
+  de_reference: string;
+  category: FindingCategory;
+  decision: FindingDecision;
+  target_equivalent: string | null;
+  instruction: string;
 }
 
 export interface SourceDoc {
   url: string;
   finalUrl: string;
   httpStatus: number;
-  canonical: string | null;
   title: string | null;
-  h1: string | null;
   metaDescription: string | null;
-  hreflang: { lang: string; href: string }[];
-  sections: SourceSection[];
-  tables: SourceTable[];
+  blocks: Block[];
   wordCount: number;
-  outline: string;
-  /** Interne Links im Fließtext der Quellseite (Basis der hreflang-Ernte). */
-  contentLinks?: ContentLink[];
 }
 
-export type PlanAction = "uebersetzen" | "lokalisieren" | "umschreiben" | "streichen";
-
-export interface PlanAnchor {
-  anchor: string;
-  intent: string;
-  search_terms: string[];
-  path_type?: string | undefined;
-  /** "source_link" = aus einem Inline-Link der deutschen Quelle abgeleitet. */
-  origin?: "source_link" | "plan";
-  /** Deutsche Quell-URL des Links (nur bei origin = "source_link"). */
-  source_url?: string | null;
+export interface LocalizedMeta {
+  title: string;
+  meta_description: string;
+  slug: string;
 }
 
-export interface PlanSection {
-  de_heading: string;
-  target_heading: string;
-  action: PlanAction;
-  notes: string[];
-  has_table: boolean;
-  anchors: PlanAnchor[];
+export interface LocalizedDoc {
+  meta: LocalizedMeta;
+  blocks: LocalizedBlock[];
 }
 
-export interface VerifiedLink {
-  anchor: string;
-  target_url: string;
-  http_status: number;
-  canonical_ok: boolean;
-  confidence?: string;
-  /** Ein Absatz Inhaltszusammenfassung der Zielseite (S9). */
-  summary?: string;
-  /** "ratgeber" | "kategorie" | "produkt" | "sonstige" – aus der Zielseite abgeleitet. */
-  page_type?: string;
-  /** Deutscher Quellabschnitt des Ankers (für die abschnittsgenaue Zuweisung in S11). */
-  section_de_heading?: string;
-  /** Herkunft des Ankers (aus S6). */
-  origin?: "source_link" | "plan";
+export type ReviewIssueStatus = "applied" | "rejected" | "open" | "resolved";
+
+export interface ReviewIssue {
+  block_id: string | null;
+  origin: "code" | "llm";
+  problem: string;
+  status: ReviewIssueStatus;
+  note?: string;
+}
+
+export interface ReviewResult {
+  issues: ReviewIssue[];
+  /** IDs der Blöcke, an denen eine Korrektur übernommen wurde. */
+  applied: string[];
+  /** Offene Warnungen (abgelehnte/fehlende Korrekturen, verbleibende Code-Treffer). */
+  warnings: string[];
 }
 
 export interface JobContext {
   source?: SourceDoc;
-  slug?: { term_translated: string; slug_candidates: string[] };
-  hreflangTargetUrl?: string | null;
-  /** Zentral ermitteltes Artikelthema (Code, kein LLM). */
-  articleTopic?: {
-    main_subject_de: string;
-    category_segment_de: string | null;
-    category_segment_target: string | null;
-    main_subject_target: string | null;
-  };
-  target?: {
-    status: TargetStatus;
-    url: string | null;
-    checked: { url: string; status: number }[];
-    doc?: SourceDoc | null;
-    resolution_method?: "hreflang" | "hub" | "slug";
-    hreflang_hint?: string | null;
-    /** Nachweiskette der Zielermittlung (hreflang, Hub-Treffer, HTTP-Prüfungen). */
-    evidence?: { step: string; detail: string }[];
-  };
-  /** Aus hreflang-Paaren abgeleitete Pfadübersetzung (ergänzt market.path_map). */
-  derivedPathMap?: Record<string, string>;
-  /** Ergebnis der hreflang-Ernte über die Content-Links der Quellseite. */
-  hreflangHarvest?: {
-    checked: {
-      de_url: string;
-      status: number;
-      target_url: string | null;
-      page_type?: "magazine" | "shop";
-      discovered?: number;
-    }[];
-    entries: PoolEntry[];
-    /** Zweite Ebene: nicht abgerufene Quellkandidaten (Anker + Adresse). */
-    discovered?: PoolEntry[];
-    derived_path_map: Record<string, string>;
-    harvested_at: string;
-  };
-  /** S7a · Link-Pool statt Gesamtindex. */
-  linkPool?: {
-    hub_url: string | null;
-    built_at: string;
-    fetches: { url: string; status: number; links: number; role: string }[];
-    entries: PoolEntry[];
-    siblings: { url: string; title: string | null; text: string }[];
-  };
-  /** S7b · Ergebnis der SERP-Lückenanalyse (DataForSEO). */
-  serpGap?: {
-    ran_at: string;
-    queries: string[];
-    location_code: number;
-    language_code: string;
-    host: string;
-    results: {
-      query: string;
-      keyword: string;
-      status: "ok" | "skipped" | "error";
-      hits: number;
-      error?: string;
-    }[];
-    added: { url: string; anchor_text: string | null; intent: string | null }[];
-    rejected: { url: string; reason: string }[];
-  };
-  /** S7c · zusätzliche Linkchancen über DataForSEO (bis zu 10 Abfragen). */
-  serpOpportunities?: {
-    ran_at: string;
-    site: string;
-    host: string;
-    path_prefix: string;
-    location_code: number;
-    language_code: string;
-    ideas: { topic: string; query: string; reason?: string }[];
-    results: {
-      query: string;
-      keyword: string;
-      status: "ok" | "skipped" | "error";
-      hits: number;
-      error?: string;
-    }[];
-    added: { url: string; anchor_text: string | null; intent: string | null }[];
-    rejected: { url: string; reason: string }[];
-  };
-
-  /** Protokoll der zweistufigen Kandidatensuche (S7). */
-  linkSearchLog?: SearchLogEntry[];
-  /** Poolkandidaten, die die HTTP-Prüfung in S9 nicht bestanden haben. */
-  brokenLinks?: { anchor: string; url: string; http_status: number; reason: string }[];
-  gapReport?: GapEntry[];
-  compare?: unknown;
-  styleProfile?: unknown;
-  plan?: { sections: PlanSection[] };
-  linkCandidates?: Record<string, { url: string; title: string; path_type: string; category_segment?: string }[]>;
-  linkSelection?: {
-    anchor: string;
-    url: string | null;
-    confidence?: string;
-    reason?: string;
-    origin?: "source_link" | "plan";
-  }[];
-  verifiedLinks?: VerifiedLink[];
-  tables?: { index: number; markdown: string; section_heading?: string }[];
-  content?: { heading: string; markdown: string }[];
-  qa?: {
-    issues: {
-      type: string;
-      location: string;
-      found: string;
-      suggestion: string;
-      severity?: "error" | "warning";
-    }[];
-    blocking?: number;
-    warnings?: number;
-  };
-  contentWarnings?: string[];
-
+  findings?: Finding[];
+  localized?: LocalizedDoc;
+  review?: ReviewResult;
   exportMarkdown?: string;
 }
 
+/** Kontext-Schlüssel, die der jeweilige Schritt erzeugt (für das Zurücksetzen nachfolgender Ergebnisse). */
+export const STEP_CONTEXT_KEYS: Record<StepKey, (keyof JobContext)[]> = {
+  extract: ["source"],
+  scan: ["findings"],
+  localize: ["localized"],
+  review: ["review", "exportMarkdown"],
+};
+
+/**
+ * Altjob = Kontext aus der früheren 16-Schritt-Pipeline (ohne Blockliste).
+ * Ein vorhandenes `exportMarkdown` bleibt anzeigbar.
+ */
+export function isLegacyContext(ctx: unknown): boolean {
+  if (!ctx || typeof ctx !== "object") return false;
+  const c = ctx as Record<string, unknown>;
+  if (!Object.keys(c).length) return false;
+  const source = c["source"] as { blocks?: unknown } | undefined;
+  return !Array.isArray(source?.blocks);
+}

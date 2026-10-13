@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
+import { PIPELINE } from "./types";
 
 interface TemplateRow {
   step_key: string;
@@ -27,7 +28,14 @@ export async function buildAllPromptsMarkdown(): Promise<{
     .select("*")
     .order("sort_order");
   if (error) throw new Error(error.message);
-  const rows = (data ?? []) as unknown as TemplateRow[];
+  const all = (data ?? []) as unknown as TemplateRow[];
+  // Pipeline-Prompts zuerst (in Schrittreihenfolge), danach nicht mehr verwendete Altvorlagen.
+  const used = PIPELINE.map((s) => s.promptKey).filter((k): k is string => Boolean(k));
+  const rows = [
+    ...used.map((k) => all.find((r) => r.step_key === k)).filter((r): r is TemplateRow => Boolean(r)),
+    ...all.filter((r) => !used.includes(r.step_key)),
+  ];
+  const stepOf = (key: string) => PIPELINE.find((s) => s.promptKey === key)?.label ?? "nicht mehr verwendet";
 
   const out: string[] = [];
   out.push("# Prompt-Vorlagen · Content-Lokalisierung");
@@ -37,11 +45,11 @@ export async function buildAllPromptsMarkdown(): Promise<{
   out.push("");
   out.push("## Übersicht");
   out.push("");
-  out.push("| Vorlage | Step-Key | Version | Modell | Temp. | Max. Tokens | Aktiv |");
-  out.push("| --- | --- | --- | --- | --- | --- | --- |");
+  out.push("| Vorlage | Step-Key | Pipeline-Schritt | Version | Modell | Temp. | Max. Tokens | Aktiv |");
+  out.push("| --- | --- | --- | --- | --- | --- | --- | --- |");
   for (const r of rows) {
     out.push(
-      `| ${r.name} | \`${r.step_key}\` | v${r.version ?? 1} | ${r.model} | ${
+      `| ${r.name} | \`${r.step_key}\` | ${stepOf(r.step_key)} | v${r.version ?? 1} | ${r.model} | ${
         r.temperature ?? "—"
       } | ${r.max_tokens ?? "—"} | ${r.is_active === false ? "nein" : "ja"} |`,
     );
@@ -55,6 +63,7 @@ export async function buildAllPromptsMarkdown(): Promise<{
     out.push(`## ${r.name}`);
     out.push("");
     out.push(`- **Step-Key:** \`${r.step_key}\``);
+    out.push(`- **Pipeline-Schritt:** ${stepOf(r.step_key)}`);
     out.push(`- **Version:** v${r.version ?? 1}`);
     out.push(`- **Modell:** ${r.model} · Temperatur ${r.temperature ?? "—"} · Max. Tokens ${r.max_tokens ?? "—"}`);
     out.push(`- **Ausgabeformat:** ${r.response_format ?? "text"}`);

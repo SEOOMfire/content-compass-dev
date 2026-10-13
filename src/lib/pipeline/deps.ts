@@ -1,66 +1,28 @@
 import type { JobContext } from "./types";
 
 /**
- * Abhängigkeitsprüfung (P2-1). Rückgabe = Klartextgrund, sonst null.
- * Grundlage ist der Link-Pool (S7a), nicht mehr ein Gesamtindex des Markts.
+ * Lineare Abhängigkeiten: Schritt n braucht das Ergebnis von Schritt n−1.
+ * Rückgabe = Klartextgrund, sonst null.
  */
 export function dependencyBlocker(stepKey: string, ctx: JobContext): string | null {
-  const needSource = () => (ctx.source ? null : "S1 (Quelle extrahieren) muss zuerst laufen.");
-  const needPool = () =>
-    ctx.linkPool?.entries?.length
-      ? null
-      : "S7a (Link-Pool aufbauen) muss zuerst laufen – ohne Pool gibt es keine Zielkandidaten.";
-  const anchors = (ctx.plan?.sections ?? []).flatMap((s) => s.anchors ?? []);
-
+  const hasSource = Boolean(ctx.source?.blocks?.length);
   switch (stepKey) {
-    case "S2_resolve_slug":
-    case "S3_target_status":
-    case "S4_compare":
-    case "S7a_link_pool":
-      return needSource();
-    case "S7b_serp_gap":
-    case "S7c_serp_opportunities":
-      return ctx.source ? needPool() : needSource();
-
-    case "S5_style_profile":
-      // Fehlende Geschwisterartikel sind kein Blocker mehr: S5 läuft dann mit
-      // neutralem Standard weiter und vermerkt das Fehlen nur als Hinweis.
+    case "extract":
       return null;
-    case "S6_localization_plan":
-      return needSource();
-    case "S7_link_candidates":
-      return !ctx.plan?.sections?.length
-        ? "S6 (Lokalisierungsplan) muss zuerst laufen."
-        : !anchors.length
-          ? "S6 hat keine Anker geliefert – bitte S6 erneut ausführen."
-          : needPool();
-    case "S8_link_select":
-      return Object.values(ctx.linkCandidates ?? {}).some((l) => l.length)
+    case "scan":
+      return hasSource ? null : "Schritt 1 (Quelle extrahieren) muss zuerst erfolgreich laufen.";
+    case "localize":
+      if (!hasSource) return "Schritt 1 (Quelle extrahieren) muss zuerst erfolgreich laufen.";
+      return Array.isArray(ctx.findings)
         ? null
-        : "S7 hat keinen einzigen Linkkandidaten geliefert.";
-    case "S10_localize_tables":
-      return needSource();
-    case "S11_generate_content": {
-      if (!ctx.source) return needSource();
-      if (!ctx.plan?.sections?.length) return "S6 (Lokalisierungsplan) muss zuerst laufen.";
-      if (!ctx.styleProfile) return "S5 (Stilprofil) muss zuerst erfolgreich laufen.";
-      if (ctx.source.tables.length && !ctx.tables)
-        return "S10 (Tabellen lokalisieren) muss zuerst laufen.";
-      return null;
-    }
-    case "S12_qa":
-      return ctx.content?.length ? null : "S11 (Content erzeugen) muss zuerst laufen.";
-    case "S13_export": {
-      if (!ctx.content?.length) return "S11 (Content erzeugen) muss zuerst laufen.";
-      if (!ctx.qa) return "S12 (QA) muss zuerst laufen.";
-      const blocking =
-        ctx.qa.blocking ??
-        ctx.qa.issues.filter((i) => (i.severity ?? "error") === "error").length;
-      return blocking
-        ? `S12 meldet ${blocking} schwerwiegende Fehler – bitte zuerst beheben.`
-        : null;
-    }
-
+        : "Schritt 2 (DE-Bezüge finden) muss zuerst erfolgreich laufen.";
+    case "review":
+      if (!hasSource) return "Schritt 1 (Quelle extrahieren) muss zuerst erfolgreich laufen.";
+      if (!Array.isArray(ctx.findings))
+        return "Schritt 2 (DE-Bezüge finden) muss zuerst erfolgreich laufen.";
+      return ctx.localized?.blocks?.length
+        ? null
+        : "Schritt 3 (Lokalisieren) muss zuerst erfolgreich laufen.";
     default:
       return null;
   }
