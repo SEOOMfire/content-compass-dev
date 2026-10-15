@@ -11,6 +11,7 @@ import {
   exportFullJobDocs,
 } from "@/lib/pipeline.functions";
 import { downloadMarkdown } from "@/lib/download";
+import { renderBlock } from "@/lib/pipeline/render";
 import { useActiveWorkspace } from "@/lib/use-active-workspace";
 import {
   isLegacyContext,
@@ -170,6 +171,14 @@ function LinkingSummary({ linking }: { linking: LinkingResult }) {
             <span className="text-muted-foreground">hreflang {chosen.hreflang}:</span>{" "}
             {chosen.target_href}
           </p>
+          {linking.inserted && linking.patched_block && (
+            <div className="mt-2">
+              <p className="text-muted-foreground">So steht es im Export (Markdown):</p>
+              <pre className="mt-1 whitespace-pre-wrap rounded bg-muted p-2">
+                {renderBlock(linking.patched_block)}
+              </pre>
+            </div>
+          )}
         </div>
       ) : (
         <p className="text-muted-foreground">Kein Link eingefügt.</p>
