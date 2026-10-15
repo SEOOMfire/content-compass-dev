@@ -118,6 +118,7 @@ export const runStepFn = createServerFn({ method: "POST" })
     return {
       ok: res.ok,
       error: res.ok ? null : res.error,
+      blocked: !res.ok && "blocked" in res ? Boolean(res.blocked) : false,
       output: res.ok ? JSON.stringify(res.output ?? null) : null,
     };
   });
@@ -176,58 +177,6 @@ export const exportAllPrompts = createServerFn({ method: "POST" })
     await assertAdmin(context.userId);
     const { buildAllPromptsMarkdown } = await import("@/lib/pipeline/prompts-export.server");
     return await buildAllPromptsMarkdown();
-  });
-
-export const runFromStepFn = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((d: unknown) =>
-    z.object({ jobId: z.string().uuid(), fromStep: z.string().optional() }).parse(d),
-  )
-  .handler(async ({ data, context }) => {
-    const workspaceId = await getJobWorkspace(data.jobId);
-    await assertWorkspaceRole(context.userId, workspaceId, MANAGER_ROLES);
-    const { executeStep } = await import("@/lib/pipeline/engine.server");
-    const { PIPELINE } = await import("@/lib/pipeline/types");
-    const startIdx = data.fromStep ? PIPELINE.findIndex((s) => s.key === data.fromStep) : 0;
-
-    // Automatische Wiederholung: je Schritt maximal 3 Retries (also 4 Versuche),
-    // mit kurzer Pause für transiente Fehler (Rate-Limit, Timeout, SE-Serverfehler).
-    const MAX_STEP_RETRIES = 3;
-    const RETRY_DELAY_MS = 2000;
-
-    const runStep = async (stepKey: string) => {
-      let attempts = 0;
-      for (;;) {
-        attempts += 1;
-        const res = await executeStep(data.jobId, stepKey);
-        // Erfolg, blockierter Schritt (fehlende Voraussetzung) oder Retry-Budget
-        // erschöpft → Ergebnis zurückgeben. Sonst kurz warten und erneut versuchen.
-        // Fehlendes OpenAI-Guthaben ist nicht transient → nicht wiederholen.
-        const fatal = !res.ok && /Guthaben aufgebraucht|OPENAI_API_KEY fehlt/.test(res.error ?? "");
-        if (
-          res.ok ||
-          (res as { blocked?: boolean }).blocked ||
-          fatal ||
-          attempts > MAX_STEP_RETRIES
-        ) {
-          return { ...res, attempts };
-        }
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
-      }
-    };
-
-    const results: { step: string; ok: boolean; error?: string; attempts?: number }[] = [];
-    for (const step of PIPELINE.slice(Math.max(startIdx, 0))) {
-      const res = await runStep(step.key);
-      results.push({
-        step: step.key,
-        ok: res.ok,
-        attempts: res.attempts,
-        ...(res.ok ? {} : { error: res.error }),
-      });
-      if (!res.ok) break;
-    }
-    return results;
   });
 
 export const savePrompt = createServerFn({ method: "POST" })

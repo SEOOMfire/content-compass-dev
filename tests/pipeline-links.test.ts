@@ -280,6 +280,26 @@ describe("linkDocument", () => {
     expect(res.blocks).toEqual(localized.blocks);
   });
 
+  test("Zeitbudget beendet die hreflang-Prüfung", async () => {
+    let t = 0;
+    const { fetch, calls } = fakeFetch({});
+    const res = await linkDocument({
+      source,
+      localized,
+      market: AT,
+      fetchPage: async (url) => {
+        t += 60_000;
+        return fetch(url);
+      },
+      call: mockCall([]),
+      budgetMs: 50_000,
+      now: () => t,
+    });
+    expect(calls).toHaveLength(1);
+    expect(res.linking.notes.some((n) => n.includes("Zeitbudget"))).toBe(true);
+    expect(res.linking.chosen).toBeNull();
+  });
+
   test("Altjob ohne Linkdaten ergibt eine Warnung", async () => {
     const { links: _omit, ...legacy } = source;
     const res = await linkDocument({

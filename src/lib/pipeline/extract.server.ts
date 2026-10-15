@@ -8,17 +8,22 @@ export { countBlockWords };
 export const USER_AGENT =
   "Mozilla/5.0 (compatible; OMfireLocalizationBot/1.0; +https://www.fressnapf.de/)";
 
+/** Höchstdauer eines Seitenabrufs (inkl. Body), danach gilt die Seite als nicht erreichbar. */
+export const FETCH_TIMEOUT_MS = 20_000;
+
 /**
- * Lädt eine Seite. Netzwerk- und URL-Fehler werfen nicht, sondern liefern
+ * Lädt eine Seite. Netzwerk-, Timeout- und URL-Fehler werfen nicht, sondern liefern
  * Status 0, damit der Schritt eine klare Fehlermeldung erzeugen kann.
  */
 export async function fetchHtml(
   url: string,
+  timeoutMs = FETCH_TIMEOUT_MS,
 ): Promise<{ status: number; finalUrl: string; html: string }> {
   try {
     const res = await fetch(url, {
       redirect: "follow",
       headers: { "user-agent": USER_AGENT, accept: "text/html,application/xhtml+xml" },
+      signal: AbortSignal.timeout(timeoutMs),
     });
     const html = res.headers.get("content-type")?.includes("text/") ? await res.text() : "";
     return { status: res.status, finalUrl: res.url || url, html };

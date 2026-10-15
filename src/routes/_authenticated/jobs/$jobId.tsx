@@ -6,7 +6,6 @@ import { Play, RefreshCw, ChevronDown, FileDown, Copy } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import {
   runStepFn,
-  runFromStepFn,
   exportJobReport,
   exportPromptVars,
   exportFullJobDocs,
@@ -49,6 +48,10 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "
   error: "destructive",
   pending: "outline",
 };
+
+/** Automatische Wiederholungen je Schritt bei „Komplett ausführen“ (also 4 Versuche). */
+const MAX_STEP_RETRIES = 3;
+const RETRY_DELAY_MS = 2000;
 
 const DECISION_LABEL: Record<string, string> = {
   ersetzen: "ersetzen",
@@ -263,18 +266,47 @@ function JobDetail() {
     }
   }
 
+  /**
+   * Ein Schritt mit automatischer Wiederholung: höchstens 3 Retries (4 Versuche) mit
+   * kurzer Pause für transiente Fehler. Blockierte Schritte und fehlendes Guthaben
+   * werden nicht wiederholt.
+   */
+  async function runStepWithRetry(stepKey: string) {
+    for (let attempt = 1; ; attempt++) {
+      let res: { ok: boolean; error: string | null; blocked?: boolean };
+      try {
+        res = await runStepFn({ data: { jobId, stepKey } });
+      } catch (err) {
+        res = { ok: false, error: err instanceof Error ? err.message : "Fehler" };
+      }
+      const fatal = !res.ok && /Guthaben aufgebraucht|OPENAI_API_KEY fehlt/.test(res.error ?? "");
+      if (res.ok || res.blocked || fatal || attempt > MAX_STEP_RETRIES) {
+        return { ...res, attempts: attempt };
+      }
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+      await refresh();
+    }
+  }
+
+  /**
+   * Führt die Schritte ab `fromStep` nacheinander aus – je Schritt ein eigener Request,
+   * damit kein Request das Zeitlimit des Hostings (Vercel: 300 s) überschreitet.
+   */
   async function runAll(fromStep?: string) {
     setBusy("all");
     try {
-      const res = await runFromStepFn({
-        data: fromStep ? { jobId, fromStep } : { jobId },
-      });
-      const failed = res.find((r) => !r.ok);
-      if (failed) {
-        toast.error(
-          `${failed.step}: ${failed.error}${failed.attempts ? ` (${failed.attempts} Versuche)` : ""}`,
-        );
-      } else toast.success("Pipeline abgeschlossen");
+      const start = fromStep ? PIPELINE.findIndex((s) => s.key === fromStep) : 0;
+      for (const step of PIPELINE.slice(Math.max(start, 0))) {
+        const res = await runStepWithRetry(step.key);
+        await refresh();
+        if (!res.ok) {
+          toast.error(
+            `${step.key}: ${res.error ?? "Fehler"}${res.attempts > 1 ? ` (${res.attempts} Versuche)` : ""}`,
+          );
+          return;
+        }
+      }
+      toast.success("Pipeline abgeschlossen");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Fehler");
     } finally {

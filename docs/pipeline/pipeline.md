@@ -20,8 +20,10 @@ keine Liste, Tabelle oder Überschrift erfinden oder zerstören.
 
 Abhängigkeiten sind linear: Schritt n braucht das Ergebnis von Schritt n−1. Läuft ein
 Schritt neu, werden die Ergebnisse aller späteren Schritte verworfen und ihre Karten auf
-`pending` gesetzt. „Komplett ausführen“ läuft alle Schritte in einem Request nacheinander
-(je Schritt bis zu 3 automatische Wiederholungen bei Fehlern).
+`pending` gesetzt. „Komplett ausführen“ läuft alle Schritte nacheinander, **je Schritt ein
+eigener Request** (je Schritt bis zu 3 automatische Wiederholungen bei Fehlern). So bleibt
+jeder Request unter dem Zeitlimit des Hostings (Vercel: 300 s); ein Gesamtlauf mit
+Reasoning-Modellen dauert mehrere Minuten. Seitenabrufe brechen nach 20 s ab.
 
 ## Datenmodell
 
@@ -151,7 +153,8 @@ Datei: `src/lib/pipeline/links.ts`
   1. `hreflang` = `locale` des Markts (z. B. `de-AT`), Host passt zur Marktdomain (`markets.domain`),
   2. sonst gleiche Sprache auf der Marktdomain (z. B. `pl` auf der polnischen Domain).
   `x-default` und reine Sprachcodes auf fremden Domains zählen nicht. Die Ziel-URL muss mit
-  HTTP 200 antworten. Der erste Treffer gewinnt.
+  HTTP 200 antworten. Der erste Treffer gewinnt. Die Prüfung endet spätestens nach 90 s
+  (`LINK_CHECK_BUDGET_MS`).
 - **Einfügen (genau 1×):** KI `link_integration` setzt die URL als `[Anker](URL)` an die Stelle,
   die dem deutschen Ankertext entspricht. Der Code übernimmt die Antwort nur, wenn die Struktur
   gleich ist, genau ein neuer Link auf die vorgegebene URL entsteht und der Text ohne

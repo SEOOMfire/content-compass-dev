@@ -20,6 +20,8 @@ import type {
 
 /** Höchstens so viele verlinkte DE-Seiten werden je Job auf hreflang geprüft. */
 export const MAX_LINK_CHECKS = 15;
+/** Zeitbudget für die hreflang-Prüfung (ms); danach wird mit dem bisherigen Stand weitergemacht. */
+export const LINK_CHECK_BUDGET_MS = 90_000;
 /** Gezielte Nachfragen, wenn das Modell den Link nicht korrekt einsetzt. */
 export const MAX_LINK_RETRIES = 1;
 /** Nur in diesen Blocktypen wird ein Link gesetzt (keine Überschriften/Tabellen). */
@@ -235,6 +237,10 @@ export interface LinkArgs {
   maxRetries?: number;
   /** Pause zwischen zwei Seitenabrufen (ms). */
   delayMs?: number;
+  /** Zeitbudget für die hreflang-Prüfung (ms). */
+  budgetMs?: number;
+  /** Uhr (für Tests). */
+  now?: () => number;
 }
 
 export interface LinkOutcome {
@@ -309,7 +315,13 @@ export async function linkDocument(args: LinkArgs): Promise<LinkOutcome> {
     args.delayMs ? new Promise((r) => setTimeout(r, args.delayMs)) : Promise.resolve();
 
   // 1 · hreflang je verlinkter Seite prüfen, erster Treffer gewinnt.
+  const now = args.now ?? Date.now;
+  const deadline = now() + (args.budgetMs ?? LINK_CHECK_BUDGET_MS);
   for (const [i, link] of eligible.slice(0, maxChecks).entries()) {
+    if (now() > deadline) {
+      result.notes.push(`Zeitbudget erreicht – ${i} von ${eligible.length} Links geprüft.`);
+      break;
+    }
     if (i > 0) await pause();
     const check: LinkCheck = { block_id: link.block_id, href: link.href, status: 0, target: null };
     result.checked.push(check);
