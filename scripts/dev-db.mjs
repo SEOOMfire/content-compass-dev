@@ -44,6 +44,7 @@ function buildSetupSql() {
   setup = setup.replace(/^INSERT INTO public\.user_roles VALUES .*$/gm, "-- (user_roles-Seed in Dev ausgelassen)");
   const m0009 = readFileSync(join(ROOT, "drizzle/migrations/0009_workspaces.sql"), "utf8");
   const m0010 = readFileSync(join(ROOT, "drizzle/migrations/0010_simplified_pipeline.sql"), "utf8");
+  const m0011 = readFileSync(join(ROOT, "drizzle/migrations/0011_prompt_quality_v2.sql"), "utf8");
   return [
     "-- ============================================================",
     "-- dev-setup.sql – erzeugt mit `node scripts/dev-db.mjs build`",
@@ -51,6 +52,7 @@ function buildSetupSql() {
     "-- Inhalt: db-export/setup.sql (ohne user_roles-Seed)",
     "--         + drizzle/migrations/0009_workspaces.sql",
     "--         + drizzle/migrations/0010_simplified_pipeline.sql",
+    "--         + drizzle/migrations/0011_prompt_quality_v2.sql",
     "-- ============================================================",
     "",
     setup,
@@ -60,6 +62,9 @@ function buildSetupSql() {
     "",
     "-- ================= 0010_simplified_pipeline ================",
     m0010,
+    "",
+    "-- ================= 0011_prompt_quality_v2 =================",
+    m0011,
     "",
   ].join("\n");
 }
