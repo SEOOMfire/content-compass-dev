@@ -11,6 +11,9 @@ Platzhalter in doppelten geschweiften Klammern werden vor dem Absenden ersetzt; 
 | 2 · DE-Bezüge finden | `localization_scan` | gpt-4o | 0,2 | 4000 | JSON |
 | 3 · Lokalisieren | `localize_document` | gpt-4o | 0,3 | 16000 | JSON |
 | 4 · Review | `localization_review` | gpt-4o | 0,2 | 8000 | JSON |
+| 5 · Interner Link (hreflang) | `link_integration` | gpt-4o | 0,1 | 2000 | JSON |
+
+Der Prompt für Schritt 5 kommt aus `drizzle/migrations/0012_link_integration_prompt.sql` (Version 1); Wortlaut siehe dort.
 
 Schritt 1 (`extract`) arbeitet ohne KI. Die Prompts der früheren Pipeline (z. B. `generate_content`, `qa`, `link_select`) bleiben in der Datenbank, werden aber nicht mehr verwendet.
 

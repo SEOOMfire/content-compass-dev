@@ -37,7 +37,7 @@ const env = { ...envFile, ...envLocal, ...process.env };
 const PROD_ID = envFile.SUPABASE_PROJECT_ID ?? "";
 const DEV_ID = env.SUPABASE_PROJECT_ID_dev ?? "";
 
-/** Schema + Stammdaten + Workspaces (0009) + vereinfachte Pipeline (0010) als ein Skript. */
+/** Schema + Stammdaten + Workspaces (0009) + vereinfachte Pipeline (0010–0012) als ein Skript. */
 function buildSetupSql() {
   let setup = readFileSync(join(ROOT, "db-export/setup.sql"), "utf8");
   // Rollen-Seeds des Quellprojekts verweisen auf fremde auth.users → in Dev weglassen.
@@ -45,6 +45,7 @@ function buildSetupSql() {
   const m0009 = readFileSync(join(ROOT, "drizzle/migrations/0009_workspaces.sql"), "utf8");
   const m0010 = readFileSync(join(ROOT, "drizzle/migrations/0010_simplified_pipeline.sql"), "utf8");
   const m0011 = readFileSync(join(ROOT, "drizzle/migrations/0011_prompt_quality_v2.sql"), "utf8");
+  const m0012 = readFileSync(join(ROOT, "drizzle/migrations/0012_link_integration_prompt.sql"), "utf8");
   return [
     "-- ============================================================",
     "-- dev-setup.sql – erzeugt mit `node scripts/dev-db.mjs build`",
@@ -53,6 +54,7 @@ function buildSetupSql() {
     "--         + drizzle/migrations/0009_workspaces.sql",
     "--         + drizzle/migrations/0010_simplified_pipeline.sql",
     "--         + drizzle/migrations/0011_prompt_quality_v2.sql",
+    "--         + drizzle/migrations/0012_link_integration_prompt.sql",
     "-- ============================================================",
     "",
     setup,
@@ -65,6 +67,9 @@ function buildSetupSql() {
     "",
     "-- ================= 0011_prompt_quality_v2 =================",
     m0011,
+    "",
+    "-- ============== 0012_link_integration_prompt ===============",
+    m0012,
     "",
   ].join("\n");
 }
@@ -114,7 +119,7 @@ if (cmd === "build") {
       const [m] = await sql`select count(*)::int as n from public.markets`;
       const prompts = await sql`
         select step_key, version from public.prompt_templates
-        where step_key in ('localization_scan','localize_document','localization_review') order by sort_order`;
+        where step_key in ('localization_scan','localize_document','localization_review','link_integration') order by sort_order`;
       const [col] = await sql`
         select count(*)::int as n from information_schema.columns
         where table_schema='public' and table_name='markets' and column_name='localization_notes'`;
