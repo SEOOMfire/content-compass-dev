@@ -288,7 +288,9 @@ function JobDetail() {
       } catch (err) {
         res = { ok: false, error: err instanceof Error ? err.message : "Fehler" };
       }
-      const fatal = !res.ok && /Guthaben aufgebraucht|OPENAI_API_KEY fehlt/.test(res.error ?? "");
+      const fatal =
+        !res.ok &&
+        /Guthaben aufgebraucht|OPENAI_API_KEY fehlt|Seite neu laden/.test(res.error ?? "");
       if (res.ok || res.blocked || fatal || attempt > MAX_STEP_RETRIES) {
         return { ...res, attempts: attempt };
       }
