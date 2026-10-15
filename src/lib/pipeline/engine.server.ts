@@ -7,7 +7,9 @@ import {
   type JobContext,
   type StepKey,
 } from "./types";
-import { extractSource } from "./extract.server";
+import { extractSource, fetchHtml } from "./extract.server";
+import { linkDocument } from "./links";
+import { renderMarkdown } from "./render";
 import {
   runPrompt,
   startVarRecording,
@@ -27,6 +29,9 @@ import {
 import { reviewDocument } from "./review";
 
 export { dependencyBlocker };
+
+/** Pause zwischen zwei Seitenabrufen in Schritt 5 (schont die Quellseite). */
+const LINK_FETCH_DELAY_MS = 250;
 
 type MarketRow = Record<string, unknown> & {
   id: string;
@@ -238,6 +243,40 @@ export async function runStep(
       };
     }
 
+    case "links": {
+      const source = requireSource(ctx);
+      if (!ctx.localized) throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+      // Fehlt die Vorlage, wird das als Warnung geführt – der Export bleibt dann ohne Link.
+      let call: PromptCall;
+      try {
+        call = promptCall(await loadTemplate("link_integration"));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Prompt-Template fehlt";
+        call = async () => {
+          throw new Error(`${message} (Migration 0012 ausführen)`);
+        };
+      }
+      const res = await linkDocument({
+        source,
+        localized: ctx.localized,
+        market,
+        fetchPage: fetchHtml,
+        call,
+        delayMs: LINK_FETCH_DELAY_MS,
+      });
+      const exportMarkdown = renderMarkdown(res.blocks, ctx.localized.meta, {
+        closing_note: market.closing_note,
+      });
+      return {
+        output: { ...res.linking, export_length: exportMarkdown.length },
+        context: { linking: res.linking, exportMarkdown },
+        ...(res.stats.model ? { model: res.stats.model } : {}),
+        ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
+        tokensIn: res.stats.tokensIn,
+        tokensOut: res.stats.tokensOut,
+      };
+    }
+
     default:
       throw new Error(`Unbekannter Schritt: ${stepKey}`);
   }
@@ -391,8 +430,9 @@ async function syncJobStatus(jobId: string, ctx: JobContext) {
     (s) => STEP_BY_KEY[s.step_key],
   );
   const problems = rows.filter((s) => s.status === "error" || s.status === "blocked").length;
-  const finished = rows.find((s) => s.step_key === "review")?.status === "done";
-  const warnings = ctx.review?.warnings?.length ?? 0;
+  const lastStep = PIPELINE[PIPELINE.length - 1]!.key;
+  const finished = rows.find((s) => s.step_key === lastStep)?.status === "done";
+  const warnings = (ctx.review?.warnings?.length ?? 0) + (ctx.linking?.warnings?.length ?? 0);
   const status = finished
     ? problems || warnings
       ? "done_with_errors"
@@ -474,6 +514,13 @@ function describeStepInput(
         findings: ctx.findings?.length ?? 0,
         localized_blocks: ctx.localized?.blocks.length ?? 0,
         removed_blocks: ctx.localized?.blocks.filter((b) => b.removed).map((b) => b.id) ?? [],
+      };
+    case "links":
+      return {
+        locale: market.locale,
+        domain: market.domain,
+        internal_links: ctx.source?.links?.length ?? null,
+        links: (ctx.source?.links ?? []).slice(0, 30),
       };
     default:
       return {};

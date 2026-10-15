@@ -741,12 +741,13 @@ describe("review", () => {
 // ---------------------------------------------------------------------------
 
 describe("pipeline", () => {
-  test("genau 4 Schritte in fester Reihenfolge", () => {
-    expect(PIPELINE.map((s) => s.key)).toEqual(["extract", "scan", "localize", "review"]);
+  test("genau 5 Schritte in fester Reihenfolge", () => {
+    expect(PIPELINE.map((s) => s.key)).toEqual(["extract", "scan", "localize", "review", "links"]);
     expect(PIPELINE.filter((s) => s.promptKey).map((s) => s.promptKey)).toEqual([
       "localization_scan",
       "localize_document",
       "localization_review",
+      "link_integration",
     ]);
   });
 
@@ -766,6 +767,20 @@ describe("pipeline", () => {
     expect(dependencyBlocker("localize", { source })).toContain("Schritt 2");
     expect(dependencyBlocker("localize", { source, findings: [] })).toBeNull();
     expect(dependencyBlocker("review", { source, findings: [] })).toContain("Schritt 3");
+    const localized = {
+      meta: { title: "t", meta_description: "", slug: "t" },
+      blocks: source.blocks,
+    };
+    expect(dependencyBlocker("links", { source, findings: [], localized })).toContain("Schritt 4");
+    expect(
+      dependencyBlocker("links", {
+        source,
+        findings: [],
+        localized,
+        review: { issues: [], applied: [], warnings: [] },
+        exportMarkdown: "x",
+      }),
+    ).toBeNull();
   });
 
   test("Altjobs werden erkannt", () => {

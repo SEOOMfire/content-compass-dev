@@ -18,6 +18,7 @@ import {
   PIPELINE,
   type Finding,
   type JobContext,
+  type LinkingResult,
   type ReviewIssue,
 } from "@/lib/pipeline/types";
 import { Button } from "@/components/ui/button";
@@ -139,6 +140,63 @@ function ReviewList({ issues, warnings }: { issues: ReviewIssue[]; warnings: str
                   ({i.origin === "llm" ? "KI" : "Code"})
                 </span>
                 {i.note && <span className="block pl-4 text-muted-foreground">{i.note}</span>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function LinkingSummary({ linking }: { linking: LinkingResult }) {
+  const chosen = linking.chosen;
+  return (
+    <div className="space-y-3">
+      {chosen ? (
+        <div>
+          <p className="mb-1 font-medium">
+            {linking.inserted ? "Link eingefügt" : "Treffer gefunden, aber nicht eingefügt"} ·{" "}
+            <span className="tabular-nums text-muted-foreground">{chosen.block_id}</span>
+          </p>
+          <p className="break-all">
+            <span className="text-muted-foreground">DE:</span> {chosen.anchor_de} →{" "}
+            {chosen.source_href}
+          </p>
+          <p className="break-all">
+            <span className="text-muted-foreground">hreflang {chosen.hreflang}:</span>{" "}
+            {chosen.target_href}
+          </p>
+        </div>
+      ) : (
+        <p className="text-muted-foreground">Kein Link eingefügt.</p>
+      )}
+      {linking.warnings.length > 0 && (
+        <ul className="list-disc space-y-0.5 pl-5 text-destructive">
+          {linking.warnings.map((w, i) => (
+            <li key={i}>{w}</li>
+          ))}
+        </ul>
+      )}
+      {linking.notes.length > 0 && (
+        <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
+          {linking.notes.map((n, i) => (
+            <li key={i}>{n}</li>
+          ))}
+        </ul>
+      )}
+      {linking.checked.length > 0 && (
+        <details>
+          <summary className="cursor-pointer text-muted-foreground">
+            Geprüfte Links ({linking.checked.length} von {linking.candidates})
+          </summary>
+          <ul className="mt-2 space-y-0.5">
+            {linking.checked.map((c, idx) => (
+              <li key={idx} className="break-all">
+                <span className="tabular-nums text-muted-foreground">{c.block_id}</span> · {c.href}{" "}
+                <Badge variant={c.target ? "secondary" : "outline"}>
+                  {c.target ? `hreflang ${c.target.hreflang}` : (c.note ?? "kein Treffer")}
+                </Badge>
               </li>
             ))}
           </ul>
@@ -360,6 +418,10 @@ function JobDetail() {
                     />
                   )}
 
+                  {def.key === "links" && output && Array.isArray(output["checked"]) && (
+                    <LinkingSummary linking={output as unknown as LinkingResult} />
+                  )}
+
                   {step?.prompt_snapshot && (
                     <details>
                       <summary className="cursor-pointer text-muted-foreground">
@@ -370,7 +432,7 @@ function JobDetail() {
                       </pre>
                     </details>
                   )}
-                  <details open={def.key !== "scan" && def.key !== "review"}>
+                  <details open={def.key !== "scan" && def.key !== "review" && def.key !== "links"}>
                     <summary className="cursor-pointer text-muted-foreground">
                       Rohdaten (JSON)
                     </summary>

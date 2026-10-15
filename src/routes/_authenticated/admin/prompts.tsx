@@ -89,7 +89,7 @@ const CHATGPT_MODELS = [
   "gpt-5.6",
 ];
 
-/** Pipeline-Schritte mit KI-Prompt (scan, localize, review). */
+/** Pipeline-Schritte mit KI-Prompt (scan, localize, review, links). */
 const PROMPT_STEPS = PIPELINE.filter((s): s is StepDef & { promptKey: string } =>
   Boolean(s.promptKey),
 );
@@ -288,7 +288,7 @@ function PromptsPage() {
         <CardHeader className="space-y-2">
           <CardTitle className="text-base">Pipeline-Prompts</CardTitle>
           <p className="text-xs text-muted-foreground">
-            Die Pipeline nutzt drei KI-Prompts. Schritt 1 (Extraktion) und das Rendern laufen ohne
+            Die Pipeline nutzt vier KI-Prompts. Schritt 1 (Extraktion) und das Rendern laufen ohne
             KI.
           </p>
           <Button variant="outline" size="sm" onClick={onExportAll} disabled={busy}>
@@ -303,7 +303,9 @@ function PromptsPage() {
                 <div key={step.key} className="rounded-md px-2 py-1.5 text-sm">
                   <div className="text-muted-foreground">{step.label}</div>
                   <div className="text-xs text-destructive">
-                    Vorlage „{step.promptKey}“ fehlt – Migration 0010 ausführen.
+                    Vorlage „{step.promptKey}“ fehlt –{" "}
+                    {step.promptKey === "link_integration" ? "Migration 0012" : "Migration 0010"}{" "}
+                    ausführen.
                   </div>
                 </div>
               );

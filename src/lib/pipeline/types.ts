@@ -1,11 +1,11 @@
 /**
- * Datenmodell der vereinfachten Lokalisierungs-Pipeline (4 Schritte).
+ * Datenmodell der vereinfachten Lokalisierungs-Pipeline (5 Schritte).
  *
  * Grundprinzip: Der Code besitzt die Struktur (Blockliste mit stabilen IDs),
  * das Modell liefert nur den Text je Block. Markdown rendert ausschließlich der Code.
  */
 
-export type StepKey = "extract" | "scan" | "localize" | "review";
+export type StepKey = "extract" | "scan" | "localize" | "review" | "links";
 
 export interface StepDef {
   key: StepKey;
@@ -48,13 +48,25 @@ export const PIPELINE: StepDef[] = [
     description:
       "Code-Prüfungen plus KI-Review mit Korrekturen, danach strukturtreues Markdown rendern.",
   },
+  {
+    key: "links",
+    order: 5,
+    label: "5 · Interner Link (hreflang)",
+    promptKey: "link_integration",
+    description:
+      "Interne Links der Quelle auf ein hreflang-Pendant für das Zielland prüfen und den ersten Treffer genau einmal in den Text setzen.",
+  },
 ];
 
 export const STEP_BY_KEY: Record<string, StepDef> = Object.fromEntries(
   PIPELINE.map((s) => [s.key, s]),
 );
 
-/** Inline-Markdown: nur **fett** und *kursiv*. Links werden zu reinem Ankertext. */
+/**
+ * Inline-Markdown: nur **fett** und *kursiv*. Links der Quelle werden zu reinem Ankertext
+ * (die Ziele stehen separat in `SourceDoc.links`). Einzige Ausnahme: Schritt 5 setzt
+ * höchstens einen Markdown-Link `[Anker](URL)` in einen Block.
+ */
 export type Inline = string;
 
 export type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
@@ -105,6 +117,13 @@ export interface Finding {
   instruction: string;
 }
 
+/** Interner Link im Inhaltsbereich der Quelle (absolute URL, ohne #Fragment). */
+export interface SourceLink {
+  block_id: string;
+  href: string;
+  anchor: string;
+}
+
 export interface SourceDoc {
   url: string;
   finalUrl: string;
@@ -113,6 +132,8 @@ export interface SourceDoc {
   metaDescription: string | null;
   blocks: Block[];
   wordCount: number;
+  /** Interne Links in Dokumentreihenfolge. Fehlt bei Jobs, die vor Schritt 5 extrahiert wurden. */
+  links?: SourceLink[];
 }
 
 export interface LocalizedMeta {
@@ -144,20 +165,59 @@ export interface ReviewResult {
   warnings: string[];
 }
 
+/** Ergebnis der hreflang-Prüfung eines internen Links. */
+export interface LinkCheck {
+  block_id: string;
+  href: string;
+  /** HTTP-Status der verlinkten DE-Seite (0 = nicht erreichbar). */
+  status: number;
+  /** Passendes hreflang-Ziel für das Zielland, sonst null. */
+  target: { hreflang: string; href: string } | null;
+  note?: string;
+}
+
+export interface LinkingResult {
+  /** Anzahl interner Links in der Quelle. */
+  candidates: number;
+  checked: LinkCheck[];
+  /** Gewählter Link (erster Treffer in Dokumentreihenfolge). */
+  chosen: {
+    block_id: string;
+    source_href: string;
+    anchor_de: string;
+    target_href: string;
+    hreflang: string;
+  } | null;
+  /** Link wurde in den Text übernommen. */
+  inserted: boolean;
+  /** Block mit eingefügtem Link (ersetzt den Block aus `localized` im Export). */
+  patched_block: LocalizedBlock | null;
+  /** Hinweise (z. B. kein Treffer). */
+  notes: string[];
+  /** Probleme, die Aufmerksamkeit brauchen (z. B. Einfügen fehlgeschlagen). */
+  warnings: string[];
+}
+
 export interface JobContext {
   source?: SourceDoc;
   findings?: Finding[];
   localized?: LocalizedDoc;
   review?: ReviewResult;
   exportMarkdown?: string;
+  linking?: LinkingResult;
 }
 
-/** Kontext-Schlüssel, die der jeweilige Schritt erzeugt (für das Zurücksetzen nachfolgender Ergebnisse). */
+/**
+ * Kontext-Schlüssel, die der jeweilige Schritt erzeugt (für das Zurücksetzen nachfolgender Ergebnisse).
+ * `exportMarkdown` gehört zu Schritt 4; Schritt 5 rendert es aus `localized` neu (mit Link),
+ * ohne `localized` zu verändern – ein Neulauf von Schritt 5 startet so immer vom Stand nach Schritt 4.
+ */
 export const STEP_CONTEXT_KEYS: Record<StepKey, (keyof JobContext)[]> = {
   extract: ["source"],
   scan: ["findings"],
   localize: ["localized"],
   review: ["review", "exportMarkdown"],
+  links: ["linking"],
 };
 
 /**

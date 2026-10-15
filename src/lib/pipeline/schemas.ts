@@ -73,6 +73,12 @@ export const ReviewOutputSchema = z.object({
     .default([]),
 });
 
+/** Schritt 5 · link_integration: vollständiger Blockinhalt mit genau einem Link. */
+export const LinkPatchSchema = z.object({
+  text: TextSchema.optional(),
+  items: z.array(ListItemInputSchema).optional(),
+});
+
 export class StepSchemaError extends Error {}
 
 /** Validiert eine Schrittausgabe. Verstoß = Fehler, kein stiller Fallback. */

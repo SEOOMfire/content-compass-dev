@@ -1,4 +1,4 @@
-# Lokalisierungs-Pipeline (4 Schritte)
+# Lokalisierungs-Pipeline (5 Schritte)
 
 Aus einer deutschen Fressnapf-URL entsteht für einen Zielmarkt ein **strukturtreues
 Markdown-Dokument**: gleiche Überschriften und Ebenen, Absätze bleiben Absätze, Listen
@@ -12,10 +12,11 @@ keine Liste, Tabelle oder Überschrift erfinden oder zerstören.
 
 | # | Step-Key | Art | Ergebnis in `jobs.context` |
 |---|---|---|---|
-| 1 | `extract` | Code | `source: { url, title, metaDescription, blocks, wordCount }` |
+| 1 | `extract` | Code | `source: { url, title, metaDescription, blocks, wordCount, links }` |
 | 2 | `scan` | KI `localization_scan` | `findings: Finding[]` |
 | 3 | `localize` | KI `localize_document` + gezielte Nachfrage | `localized: { meta, blocks }` |
 | 4 | `review` | Code-Prüfungen + KI `localization_review` + Render | `review`, `exportMarkdown` |
+| 5 | `links` | Code (hreflang) + KI `link_integration` + Render | `linking`, `exportMarkdown` (neu gerendert) |
 
 Abhängigkeiten sind linear: Schritt n braucht das Ergebnis von Schritt n−1. Läuft ein
 Schritt neu, werden die Ergebnisse aller späteren Schritte verworfen und ihre Karten auf
@@ -42,6 +43,8 @@ type Finding = {
 ```
 
 Texte sind Inline-Markdown: nur `**fett**` und `*kursiv*`; Links werden zu reinem Ankertext.
+Die internen Linkziele der Quelle stehen separat in `source.links` (`{ block_id, href, anchor }`).
+Einzige Ausnahme im Text: Schritt 5 setzt höchstens einen Markdown-Link `[Anker](URL)`.
 
 ## 1 · `extract` – Quelle extrahieren (Code)
 
@@ -62,6 +65,9 @@ Datei: `src/lib/pipeline/extract.server.ts`
     leeren Zellen aufgefüllt; Listen in Zellen werden mit `<br>` verbunden,
   - `blockquote` → `quote`.
 - **Inline:** `strong`/`b` → `**…**`, `em`/`i` → `*…*`, `a` → Text, `br` → Leerzeichen.
+- **Links:** jedes `a[href]` wird mit Block-ID und Ankertext erfasst. In `source.links` landen nur
+  interne Links (gleicher Host wie die Quelle, http/https, ohne `#`-Fragment, nicht die Seite
+  selbst) in Dokumentreihenfolge.
 - Überschriften ohne folgenden Inhalt am Dokumentende (Teaser-Reste) entfallen.
 - **Fehler:** HTTP ≠ 200 oder 0 Blöcke → Schritt `error` mit klarer Meldung.
 
@@ -132,7 +138,33 @@ Datei: `src/lib/pipeline/review.ts`
   Slug-Vorschlag), `---`, dann die Blöcke: `#`×Ebene, Absätze mit Leerzeile, `- ` bzw.
   `1. ` mit 2 Leerzeichen Einrückung je Ebene, GFM-Tabellen (ohne `th` wird Zeile 1 zur
   Kopfzeile, `|` wird escaped), Zitate mit `> `. Am Ende nur die `closing_note` des Markts.
-- **Job-Status:** `done`, bzw. `done_with_errors`, wenn Warnungen offen sind.
+
+## 5 · `links` – Interner Link per hreflang (Code + KI)
+
+Datei: `src/lib/pipeline/links.ts`
+
+- **Kandidaten:** interne Links aus `source.links` in Dokumentreihenfolge, je Ziel-URL einmal.
+  Nur Links in Absätzen, Listen und Zitaten, deren Block nicht gestrichen ist; höchstens 15
+  verlinkte Seiten werden geprüft (`MAX_LINK_CHECKS`).
+- **hreflang:** Die verlinkte DE-Seite wird geladen und ihre
+  `<link rel="alternate" hreflang="…">`-Einträge werden gelesen. Treffer:
+  1. `hreflang` = `locale` des Markts (z. B. `de-AT`), Host passt zur Marktdomain (`markets.domain`),
+  2. sonst gleiche Sprache auf der Marktdomain (z. B. `pl` auf der polnischen Domain).
+  `x-default` und reine Sprachcodes auf fremden Domains zählen nicht. Die Ziel-URL muss mit
+  HTTP 200 antworten. Der erste Treffer gewinnt.
+- **Einfügen (genau 1×):** KI `link_integration` setzt die URL als `[Anker](URL)` an die Stelle,
+  die dem deutschen Ankertext entspricht. Der Code übernimmt die Antwort nur, wenn die Struktur
+  gleich ist, genau ein neuer Link auf die vorgegebene URL entsteht und der Text ohne
+  Link-Syntax unverändert ist (1 gezielte Nachfrage).
+- **Export:** `exportMarkdown` wird aus `localized` plus dem geänderten Block neu gerendert;
+  `localized` selbst bleibt unverändert, ein Neulauf startet also immer vom Stand nach Schritt 4.
+- Der Schritt blockiert nie: Kein Treffer ist ein Hinweis; fehlgeschlagenes Einfügen, fehlende
+  Vorlage oder Quellen ohne Linkdaten (vor Schritt 5 extrahiert → Schritt 1 neu ausführen)
+  sind Warnungen.
+
+## Job-Status
+
+`done` nach Schritt 5, bzw. `done_with_errors`, wenn Warnungen aus Schritt 4 oder 5 offen sind.
 
 ## Marktprofil
 

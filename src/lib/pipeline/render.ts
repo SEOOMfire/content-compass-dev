@@ -60,6 +60,7 @@ export interface RenderMarket {
 /**
  * Strukturtreues Markdown: Meta-Kopf, dann `---`, dann die Blöcke in Quellreihenfolge.
  * Kein Link-, Quellen- oder Metadaten-Anhang; nur die `closing_note` des Markts am Ende.
+ * Inline-Links (höchstens einer, gesetzt in Schritt 5) stehen bereits im Blocktext.
  */
 export function renderMarkdown(
   blocks: LocalizedBlock[],

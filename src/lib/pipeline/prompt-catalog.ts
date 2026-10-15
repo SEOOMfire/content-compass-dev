@@ -25,6 +25,10 @@ export const PROMPT_VARIABLE_HINTS: Record<string, string> = {
   target_blocks: "Lokalisierte Blöcke, eine JSON-Zeile pro Block",
   removed_block_ids: "IDs gestrichener Blöcke",
   deterministic_issues: "Treffer der automatischen Code-Prüfungen",
+  target_block: "Lokalisierter Block (JSON), in den der Link gesetzt wird",
+  source_block: "Zugehöriger deutscher Quellblock (JSON) mit dem ursprünglichen Link",
+  anchor_de: "Ankertext des Links in der deutschen Quelle",
+  target_url: "hreflang-URL für das Zielland (wird exakt so verlinkt)",
 };
 
 /** Alle `{{platzhalter}}` in einem Prompt-Text (gleiche Syntax wie renderTemplate). */

@@ -1,6 +1,7 @@
 import { parse, NodeType, type HTMLElement, type Node } from "node-html-parser";
 import type { Block, HeadingLevel, ListItem, SourceDoc } from "./types";
 import { countBlockWords } from "./words";
+import { internalLinks } from "./links";
 
 export { countBlockWords };
 
@@ -200,6 +201,29 @@ function inlineChildren(el: HTMLElement, opts: InlineOptions, state: InlineState
   return out;
 }
 
+/** Roh-Link (href wie im HTML) während der Erfassung eines Blocks. */
+interface RawLink {
+  href: string;
+  anchor: string;
+}
+
+/**
+ * Sammelstelle für Links des Blocks, der gerade erfasst wird. Der Walk ist synchron,
+ * daher reicht eine modulweite Variable (siehe `captureLinks`).
+ */
+let linkSink: RawLink[] | null = null;
+
+function captureLinks<T>(fn: () => T): { value: T; links: RawLink[] } {
+  const prev = linkSink;
+  const links: RawLink[] = [];
+  linkSink = links;
+  try {
+    return { value: fn(), links };
+  } finally {
+    linkSink = prev;
+  }
+}
+
 function inlineNode(node: Node, opts: InlineOptions, state: InlineState): string {
   if (node.nodeType === NodeType.TEXT_NODE) {
     return (node as unknown as { text: string }).text;
@@ -209,6 +233,13 @@ function inlineNode(node: Node, opts: InlineOptions, state: InlineState): string
   if (opts.skipTags?.has(tag)) return " ";
   if (VOID_SKIP_TAGS.has(tag)) return "";
   if (tag === "br") return " ";
+  if (tag === "a") {
+    const text = inlineChildren(node, opts, state);
+    const href = node.getAttribute("href")?.trim();
+    const anchor = text.replace(/\*+/g, "").replace(/\s+/g, " ").trim();
+    if (href && anchor && linkSink) linkSink.push({ href, anchor });
+    return text;
+  }
   if (opts.formatting && (tag === "strong" || tag === "b")) {
     if (state.bold) return inlineChildren(node, opts, state);
     return wrap("**", inlineChildren(node, opts, { ...state, bold: true }));
@@ -342,10 +373,13 @@ type BlockDraft = Block extends infer T ? (T extends Block ? Omit<T, "id"> : nev
 
 interface WalkState {
   blocks: BlockDraft[];
+  /** Links je Block-Index (gleiche Reihenfolge wie `blocks`). */
+  links: RawLink[][];
 }
 
-function pushBlock(state: WalkState, block: BlockDraft) {
+function pushBlock(state: WalkState, block: BlockDraft, links: RawLink[] = []) {
   state.blocks.push(block);
+  state.links.push(links);
 }
 
 /** Rekursiver DOM-Walk in Dokumentreihenfolge – jedes Element wird genau einmal erfasst. */
@@ -353,11 +387,16 @@ function walk(el: HTMLElement, state: WalkState) {
   let run: Node[] = [];
   const flush = () => {
     if (!run.length) return;
-    const text = normalizeInline(
-      run.map((n) => inlineNode(n, { formatting: true }, { bold: false, italic: false })).join(""),
-    );
+    const nodes = run;
     run = [];
-    if (text) pushBlock(state, { type: "paragraph", text });
+    const { value: text, links } = captureLinks(() =>
+      normalizeInline(
+        nodes
+          .map((n) => inlineNode(n, { formatting: true }, { bold: false, italic: false }))
+          .join(""),
+      ),
+    );
+    if (text) pushBlock(state, { type: "paragraph", text }, links);
   };
 
   for (const child of el.childNodes) {
@@ -369,29 +408,31 @@ function walk(el: HTMLElement, state: WalkState) {
     const tag = tagOf(child);
     if (HEADING_TAGS.has(tag)) {
       flush();
-      const text = headingText(child);
-      if (text) pushBlock(state, { type: "heading", level: Number(tag[1]) as HeadingLevel, text });
+      const { value: text, links } = captureLinks(() => headingText(child));
+      if (text)
+        pushBlock(state, { type: "heading", level: Number(tag[1]) as HeadingLevel, text }, links);
     } else if (tag === "p") {
       flush();
       if (hasBlockDescendant(child)) {
         walk(child, state);
       } else {
-        const text = inlineText(child);
-        if (text) pushBlock(state, { type: "paragraph", text });
+        const { value: text, links } = captureLinks(() => inlineText(child));
+        if (text) pushBlock(state, { type: "paragraph", text }, links);
       }
     } else if (LIST_TAGS.has(tag)) {
       flush();
-      const items = parseListItems(child);
-      if (items.length) pushBlock(state, { type: "list", ordered: tag === "ol", items });
+      const { value: items, links } = captureLinks(() => parseListItems(child));
+      if (items.length) pushBlock(state, { type: "list", ordered: tag === "ol", items }, links);
     } else if (tag === "table") {
       flush();
-      const t = parseTable(child);
+      const { value: t, links } = captureLinks(() => parseTable(child));
       if (t.caption) pushBlock(state, { type: "paragraph", text: t.caption });
-      if (t.rows.length) pushBlock(state, { type: "table", hasHeader: t.hasHeader, rows: t.rows });
+      if (t.rows.length)
+        pushBlock(state, { type: "table", hasHeader: t.hasHeader, rows: t.rows }, links);
     } else if (tag === "blockquote") {
       flush();
-      const text = inlineText(child);
-      if (text) pushBlock(state, { type: "quote", text });
+      const { value: text, links } = captureLinks(() => inlineText(child));
+      if (text) pushBlock(state, { type: "quote", text }, links);
     } else if (VOID_SKIP_TAGS.has(tag)) {
       continue;
     } else if (tag === "br") {
@@ -436,6 +477,8 @@ export interface ExtractedBlocks {
   title: string | null;
   metaDescription: string | null;
   blocks: Block[];
+  /** Alle Links im Inhaltsbereich (href wie im HTML) mit Block-ID, in Dokumentreihenfolge. */
+  links: { block_id: string; href: string; anchor: string }[];
 }
 
 /** Reine Funktion: HTML → Meta + Blockliste mit IDs b1, b2, … in Dokumentreihenfolge. */
@@ -450,20 +493,23 @@ export function extractBlocks(html: string): ExtractedBlocks {
     for (const node of root.querySelectorAll(selector)) node.remove();
   }
 
-  const state: WalkState = { blocks: [] };
+  const state: WalkState = { blocks: [], links: [] };
   walk(contentRoot(root), state);
   const blocks = trimTrailingHeadings(state.blocks).map(
     (b, i) => ({ id: `b${i + 1}`, ...b }) as Block,
   );
-  return { title, metaDescription, blocks };
+  const links = blocks.flatMap((b, i) =>
+    (state.links[i] ?? []).map((l) => ({ block_id: b.id, href: l.href, anchor: l.anchor })),
+  );
+  return { title, metaDescription, blocks, links };
 }
 
 /** Lädt die Quelle und zerlegt sie in Blöcke. */
 export async function extractSource(url: string): Promise<SourceDoc> {
   const { status, finalUrl, html } = await fetchHtml(url);
-  const { title, metaDescription, blocks } = html
+  const { title, metaDescription, blocks, links } = html
     ? extractBlocks(html)
-    : { title: null, metaDescription: null, blocks: [] };
+    : { title: null, metaDescription: null, blocks: [], links: [] };
   return {
     url,
     finalUrl,
@@ -472,5 +518,6 @@ export async function extractSource(url: string): Promise<SourceDoc> {
     metaDescription,
     blocks,
     wordCount: countBlockWords(blocks),
+    links: internalLinks(links, finalUrl),
   };
 }

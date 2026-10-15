@@ -154,6 +154,34 @@ export async function buildJobReport(jobId: string): Promise<{ filename: string;
   }
   out.push("");
 
+  out.push("## Interner Link (Schritt 5)");
+  out.push("");
+  const linking = ctx.linking;
+  if (!linking) {
+    out.push("_Noch nicht ausgeführt._");
+  } else {
+    if (linking.chosen) {
+      out.push(
+        `- ${linking.inserted ? "Eingefügt" : "Nicht eingefügt"} in ${linking.chosen.block_id}: ${linking.chosen.anchor_de} (${linking.chosen.source_href}) → hreflang ${linking.chosen.hreflang}: ${linking.chosen.target_href}`,
+      );
+    } else {
+      out.push("- Kein Link eingefügt.");
+    }
+    for (const w of linking.warnings) out.push(`- Warnung: ${w}`);
+    for (const n of linking.notes) out.push(`- Hinweis: ${n}`);
+    if (linking.checked.length) {
+      out.push("");
+      out.push("| Block | DE-Link | HTTP | hreflang-Ziel | Hinweis |");
+      out.push("| --- | --- | --- | --- | --- |");
+      for (const c of linking.checked) {
+        out.push(
+          `| ${c.block_id} | ${cell(c.href)} | ${c.status} | ${cell(c.target ? `${c.target.hreflang}: ${c.target.href}` : null)} | ${cell(c.note)} |`,
+        );
+      }
+    }
+  }
+  out.push("");
+
   out.push("## Job-Kontext (Endstand)");
   out.push(json(ctx, 20000));
   out.push("");

@@ -11,6 +11,8 @@ export interface MarketProfile {
   forbidden_claims: string[];
   localization_notes: string | null;
   closing_note: string | null;
+  /** Domain des Zielmarkts (z. B. „fressnapf.at“) – für den hreflang-Abgleich in Schritt 5. */
+  domain: string | null;
 }
 
 function str(v: unknown): string {
@@ -50,6 +52,7 @@ export function toMarketProfile(row: Record<string, unknown>): MarketProfile {
     forbidden_claims: normalizeClaims(row["forbidden_claims"]),
     localization_notes: nullableStr(row["localization_notes"]),
     closing_note: nullableStr(row["closing_note"]),
+    domain: nullableStr(row["domain"]),
   };
 }
 
