@@ -465,6 +465,46 @@ describe("scan · normalizeFindings", () => {
     ]);
     expect(res.findings.map((f) => f.id)).toEqual(["f1", "f2", "f3"]);
   });
+
+  test("ersetzen/neutral gelten für alle Vorkommen, streichen bleibt auf gemeldete Blöcke beschränkt", () => {
+    const doc: Block[] = [
+      { id: "b1", type: "heading", level: 2, text: "Das Wasserschwein im Wasser" },
+      { id: "b2", type: "paragraph", text: "Im deutschsprachigen Raum heißt es auch Wasserschwein." },
+      { id: "b3", type: "list", ordered: false, items: [{ text: "Wasserschweine sind gesellig" }] },
+      { id: "b4", type: "paragraph", text: "Infos gibt es beim Amt XY." },
+      { id: "b5", type: "paragraph", text: "Auch das Amt XY berät." },
+    ];
+    const res = normalizeFindings(
+      {
+        findings: [
+          {
+            block_ids: ["b2"],
+            de_reference: "Wasserschwein",
+            category: "sonstiges",
+            decision: "ersetzen",
+            target_equivalent: "kapibara",
+            instruction: "Übliche Bezeichnung verwenden.",
+          },
+          {
+            block_ids: ["b4"],
+            de_reference: "Amt XY",
+            category: "behoerde",
+            decision: "streichen",
+            target_equivalent: null,
+            instruction: "Streichen.",
+          },
+        ],
+      },
+      doc,
+      { ...PL, institutions: {} },
+    );
+    expect(res.findings.find((f) => f.de_reference === "Wasserschwein")!.block_ids).toEqual([
+      "b1",
+      "b2",
+      "b3",
+    ]);
+    expect(res.findings.find((f) => f.de_reference === "Amt XY")!.block_ids).toEqual(["b4"]);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -81,6 +81,8 @@ Entscheidung je Fund:
 Der Code (`src/lib/pipeline/scan.ts`) validiert die Antwort (zod) und normalisiert:
 
 - unbekannte Block-IDs werden verworfen (Fund ohne gültige ID entfällt),
+- `ersetzen`/`neutral` gelten für alle Blöcke, in denen der DE-Verweis vorkommt
+  (`streichen` bleibt auf die gemeldeten Blöcke beschränkt),
 - `institutions` hat Vorrang: Wert → `ersetzen` mit diesem Wert, `null` → `neutral`,
 - `ersetzen` ohne Gegenstück wird `neutral`,
 - `institutions`-Begriffe, die im Text stehen, aber nicht gefunden wurden, werden ergänzt.

@@ -46,6 +46,7 @@ export interface ScanResult {
 /**
  * Validiert und normalisiert die Scan-Antwort:
  * - unbekannte Block-IDs werden verworfen (Fund ohne gültige ID entfällt),
+ * - `ersetzen`/`neutral` gelten für alle Blöcke, in denen der DE-Verweis vorkommt,
  * - `institutions` hat Vorrang (Wert → ersetzen, null → neutral),
  * - `ersetzen` ohne Gegenstück wird zu `neutral` („im Zweifel nicht erfinden“),
  * - im Text vorkommende `institutions`-Schlüssel ohne Fund werden ergänzt.
@@ -57,6 +58,7 @@ export function normalizeFindings(
 ): ScanResult {
   const parsed = validateStepData("scan", ScanOutputSchema, raw);
   const ids = new Set(blocks.map((b) => b.id));
+  const order = new Map(blocks.map((b, i) => [b.id, i]));
   const dropped: ScanResult["dropped"] = [];
   const findings: Finding[] = [];
 
@@ -82,6 +84,17 @@ export function normalizeFindings(
     if (decision === "ersetzen" && !target) decision = "neutral";
     if (decision !== "ersetzen") target = null;
     if (!instruction) instruction = defaultInstruction(decision, f.de_reference, target);
+    // Ersatz und Neutralisierung gelten für jedes Vorkommen des Ausdrucks im Dokument
+    // (einheitliche Begriffe, vollständige Restbestandsprüfung). Streichungen bleiben
+    // auf die gemeldeten Blöcke beschränkt, damit nicht mehr Blöcke entfallen dürfen.
+    if (decision !== "streichen") {
+      for (const b of blocks) {
+        if (!blockIds.includes(b.id) && containsTerm(blockPlainText(b), f.de_reference)) {
+          blockIds.push(b.id);
+        }
+      }
+      blockIds.sort((a, b) => order.get(a)! - order.get(b)!);
+    }
     findings.push({
       id: "",
       block_ids: blockIds,
