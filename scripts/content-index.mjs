@@ -262,10 +262,15 @@ async function crawlMarket(sql, market, { limit, force }) {
   report.total = entries.length;
 
   const existingRows = await sql`
-    select url, sitemap_lastmod, content_hash from public.content_pages where market_id = ${market.id}`;
+    select url, sitemap_lastmod::text as sitemap_lastmod, content_hash
+    from public.content_pages where market_id = ${market.id}`;
   const existingByUrl = new Map(existingRows.map((r) => [r.url, r]));
-  // lastmod normalisieren (DB-Spalte ist `date`, Sitemap liefert oft volle Timestamps).
-  const lastmodKey = (v) => (v ? String(v).slice(0, 10) : "");
+  // lastmod normalisieren: DB liefert `date` als Date-Objekt, Sitemap als String/Timestamp.
+  const lastmodKey = (v) => {
+    if (!v) return "";
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    return String(v).slice(0, 10);
+  };
 
   const toCrawl = [];
   for (const e of entries) {
