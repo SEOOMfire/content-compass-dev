@@ -300,11 +300,14 @@ export async function runStep(
         excludeUrls: string[];
         limit: number;
       }): Promise<MatchPage[]> => {
-        const rpc = supabaseAdmin.rpc as unknown as (
-          fn: string,
-          args: Record<string, unknown>,
-        ) => Promise<{ data: unknown; error: { message: string } | null }>;
-        const { data, error } = await rpc("match_content_pages", {
+        // `.rpc` muss als Methode aufgerufen werden (this-Kontext erhalten).
+        const admin = supabaseAdmin as unknown as {
+          rpc: (
+            fn: string,
+            args: Record<string, unknown>,
+          ) => Promise<{ data: unknown; error: { message: string } | null }>;
+        };
+        const { data, error } = await admin.rpc("match_content_pages", {
           query_embedding: `[${args.embedding.join(",")}]`,
           p_country: args.country,
           p_language: args.language,
