@@ -67,9 +67,10 @@ async function connect() {
 
 const USER_AGENT = "OMfireLocalizationBot/1.0";
 const EMBEDDING_MODEL = "text-embedding-3-small";
-const EMBED_MAX_CHARS = 32_000;
-const SCRAPE_CONCURRENCY = 3;
-const SCRAPE_DELAY_MS = 200;
+const EMBED_MAX_CHARS = 24_000; // ≈ 6k Tokens – sicher unter dem 8k-Limit je Input
+const EMBED_BATCH_SIZE = 40; // 40 × ~6k Tokens ≈ 240k – unter dem 300k-Limit je Request
+const SCRAPE_CONCURRENCY = 3; // max. 3 gleichzeitige Requests auf den Zielserver
+const SCRAPE_DELAY_FALLBACK_MS = 500; // Pause je Request, wenn kein crawl_delay_ms hinterlegt
 const OPENAI_BASE_URL = (env.OPENAI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
 
 function apiKey() {
@@ -98,7 +99,10 @@ async function fetchText(url) {
   try {
     const res = await fetch(url, {
       redirect: "follow",
-      headers: { "user-agent": USER_AGENT, accept: "text/html,application/xml,text/xml,text/plain,*/*" },
+      headers: {
+        "user-agent": USER_AGENT,
+        accept: "text/html,application/xml,text/xml,text/plain,*/*",
+      },
       signal: AbortSignal.timeout(20_000),
     });
     const ct = res.headers.get("content-type") ?? "";
@@ -260,11 +264,18 @@ async function crawlMarket(sql, market, { limit, force }) {
   const existingRows = await sql`
     select url, sitemap_lastmod, content_hash from public.content_pages where market_id = ${market.id}`;
   const existingByUrl = new Map(existingRows.map((r) => [r.url, r]));
+  // lastmod normalisieren (DB-Spalte ist `date`, Sitemap liefert oft volle Timestamps).
+  const lastmodKey = (v) => (v ? String(v).slice(0, 10) : "");
 
   const toCrawl = [];
   for (const e of entries) {
     const existing = existingByUrl.get(e.loc);
-    if (existing && !force && String(existing.sitemap_lastmod ?? "") === String(e.lastmod ?? "")) {
+    if (
+      existing &&
+      !force &&
+      e.lastmod &&
+      lastmodKey(existing.sitemap_lastmod) === lastmodKey(e.lastmod)
+    ) {
       report.unchanged++;
       continue;
     }
@@ -272,8 +283,10 @@ async function crawlMarket(sql, market, { limit, force }) {
   }
 
   const pages = [];
+  const delayMs =
+    Number(market.crawl_delay_ms) > 0 ? Number(market.crawl_delay_ms) : SCRAPE_DELAY_FALLBACK_MS;
   await mapWithConcurrency(toCrawl, SCRAPE_CONCURRENCY, async (e) => {
-    if (pages.length && pages.length % 10 === 0) await pause(SCRAPE_DELAY_MS);
+    await pause(delayMs);
     const { status, html } = await fetchText(e.loc);
     if (!html) {
       report.errors++;
@@ -305,17 +318,28 @@ async function crawlMarket(sql, market, { limit, force }) {
   });
 
   const needEmbed = pages.filter((p) => !p.existing || p.existing.content_hash !== p.hash);
-  for (let i = 0; i < needEmbed.length; i += 100) {
-    const batch = needEmbed.slice(i, i + 100);
-    try {
-      const vecs = await embed(batch.map((p) => p.payload.slice(0, EMBED_MAX_CHARS)));
-      batch.forEach((p, j) => (p.embedding = vecs[j] ?? []));
-    } catch (err) {
-      console.log(
-        `  ${market.locale}: Embedding-Batch fehlgeschlagen: ${err instanceof Error ? err.message : err}`,
-      );
-      batch.forEach((p) => (p.embedding = null));
+  for (let i = 0; i < needEmbed.length; i += EMBED_BATCH_SIZE) {
+    const batch = needEmbed.slice(i, i + EMBED_BATCH_SIZE);
+    let vecs = null;
+    for (let attempt = 0; attempt < 3 && !vecs; attempt++) {
+      try {
+        const got = await embed(batch.map((p) => p.payload.slice(0, EMBED_MAX_CHARS)));
+        if (!Array.isArray(got) || got.length !== batch.length) {
+          throw new Error(`Embedding-Antwort unvollständig (${got?.length ?? 0}/${batch.length}).`);
+        }
+        vecs = got;
+      } catch (err) {
+        if (attempt === 2) {
+          console.log(
+            `  ${market.locale}: Embedding-Batch fehlgeschlagen (${i}–${i + batch.length - 1}): ${err instanceof Error ? err.message : err}`,
+          );
+        } else {
+          await pause(600 * (attempt + 1));
+        }
+      }
     }
+    if (vecs) batch.forEach((p, j) => (p.embedding = vecs[j] ?? []));
+    else batch.forEach((p) => (p.embedding = null));
   }
 
   for (const p of pages) {
@@ -357,29 +381,27 @@ async function crawlMarket(sql, market, { limit, force }) {
           http_status = excluded.http_status,
           is_active = true,
           last_crawled_at = excluded.last_crawled_at`;
-    } else {
+      if (!p.existing) report.new++;
+      else report.updated++;
+    } else if (p.existing) {
+      // Hash unverändert → Embedding bleibt, nur Metadaten/Zeitstempel aktualisieren.
       await sql`
-        insert into public.content_pages
-          (url, market_id, country, language, content_type, title, h1, meta_description, content_payload, content_hash, sitemap_lastmod, http_status, is_active, last_crawled_at)
-        values
-          (${p.url}, ${common.market_id}, ${common.country}, ${common.language}, ${common.content_type}, ${common.title}, ${common.h1}, ${common.meta_description}, ${common.content_payload}, ${common.content_hash}, ${common.sitemap_lastmod}, ${common.http_status}, true, ${common.last_crawled_at})
-        on conflict (url) do update set
-          market_id = excluded.market_id,
-          country = excluded.country,
-          language = excluded.language,
-          content_type = excluded.content_type,
-          title = excluded.title,
-          h1 = excluded.h1,
-          meta_description = excluded.meta_description,
-          content_payload = excluded.content_payload,
-          content_hash = excluded.content_hash,
-          sitemap_lastmod = excluded.sitemap_lastmod,
-          http_status = excluded.http_status,
+        update public.content_pages set
+          title = ${common.title},
+          h1 = ${common.h1},
+          meta_description = ${common.meta_description},
+          content_payload = ${common.content_payload},
+          content_hash = ${common.content_hash},
+          sitemap_lastmod = ${common.sitemap_lastmod},
+          http_status = ${common.http_status},
           is_active = true,
-          last_crawled_at = excluded.last_crawled_at`;
+          last_crawled_at = ${common.last_crawled_at}
+        where url = ${p.url}`;
+      report.updated++;
+    } else {
+      // Neue Seite ohne Embedding (Batch fehlgeschlagen) → überspringen, nächster Lauf holt sie nach.
+      report.errors++;
     }
-    if (!p.existing) report.new++;
-    else report.updated++;
   }
 
   // URLs des Markts, die nicht (mehr) in der Sitemap stehen → is_active = false.
@@ -400,7 +422,7 @@ async function runCrawl(args) {
     const limit = args.limit ? Number(args.limit) : null;
     const force = Boolean(args.force);
     const markets = await sql`
-      select id, locale, domain, path_prefix, magazine_root, country, language
+      select id, locale, domain, path_prefix, magazine_root, country, language, crawl_delay_ms
       from public.markets where active order by locale`;
     const chosen = marketFilter
       ? markets.filter((m) => String(m.locale).toLowerCase() === String(marketFilter).toLowerCase())
