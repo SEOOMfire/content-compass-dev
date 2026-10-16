@@ -20,6 +20,7 @@ import {
   type JobContext,
   type LinkingResult,
   type ReviewIssue,
+  type SemanticLinkingResult,
 } from "@/lib/pipeline/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -213,6 +214,70 @@ function LinkingSummary({ linking }: { linking: LinkingResult }) {
             ))}
           </ul>
         </details>
+      )}
+    </div>
+  );
+}
+
+function SemanticLinkingSummary({ semanticLinking }: { semanticLinking: SemanticLinkingResult }) {
+  return (
+    <div className="space-y-3">
+      <p className="font-medium">
+        {semanticLinking.inserted.length} Link(s) aus {semanticLinking.keywords.length} Keyword(s)
+        eingesetzt
+      </p>
+      {semanticLinking.warnings.length > 0 && (
+        <ul className="list-disc space-y-0.5 pl-5 text-destructive">
+          {semanticLinking.warnings.map((w, i) => (
+            <li key={i}>{w}</li>
+          ))}
+        </ul>
+      )}
+      {semanticLinking.notes.length > 0 && (
+        <ul className="list-disc space-y-0.5 pl-5 text-muted-foreground">
+          {semanticLinking.notes.map((n, i) => (
+            <li key={i}>{n}</li>
+          ))}
+        </ul>
+      )}
+      {semanticLinking.keywords.length > 0 && (
+        <div className="space-y-3">
+          {semanticLinking.keywords.map((k) => (
+            <div key={k.block_id}>
+              <p>
+                <span className="tabular-nums text-muted-foreground">{k.block_id}</span> ·{" "}
+                <strong>{k.keyword}</strong>
+                {k.intent && <span className="text-muted-foreground"> · {k.intent}</span>}
+              </p>
+              {k.chosen && (
+                <p className="break-all">
+                  <Badge variant="secondary">verlinkt</Badge> {k.chosen.url}{" "}
+                  <span className="tabular-nums text-muted-foreground">
+                    (P {(k.chosen.probability * 100).toFixed(0)} % · Sim{" "}
+                    {k.chosen.similarity.toFixed(2)})
+                  </span>
+                </p>
+              )}
+              {!k.chosen && k.note && <p className="text-muted-foreground">{k.note}</p>}
+              {k.candidates.length > 0 && (
+                <ul className="mt-1 space-y-0.5 text-muted-foreground">
+                  {k.candidates.slice(0, 5).map((c, i) => (
+                    <li key={i} className="break-all">
+                      <span className="tabular-nums">
+                        {c.probability == null ? "—" : `${(c.probability * 100).toFixed(0)} %`}
+                      </span>{" "}
+                      · Sim {c.similarity.toFixed(2)} · {c.url}
+                      {c.title ? ` (${c.title})` : ""}
+                    </li>
+                  ))}
+                  {k.candidates.length > 5 && (
+                    <li>… {k.candidates.length - 5} weitere Kandidaten</li>
+                  )}
+                </ul>
+              )}
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );
@@ -465,6 +530,12 @@ function JobDetail() {
                     <LinkingSummary linking={output as unknown as LinkingResult} />
                   )}
 
+                  {def.key === "semantic_links" && output && Array.isArray(output["keywords"]) && (
+                    <SemanticLinkingSummary
+                      semanticLinking={output as unknown as SemanticLinkingResult}
+                    />
+                  )}
+
                   {step?.prompt_snapshot && (
                     <details>
                       <summary className="cursor-pointer text-muted-foreground">
@@ -475,7 +546,14 @@ function JobDetail() {
                       </pre>
                     </details>
                   )}
-                  <details open={def.key !== "scan" && def.key !== "review" && def.key !== "links"}>
+                  <details
+                    open={
+                      def.key !== "scan" &&
+                      def.key !== "review" &&
+                      def.key !== "links" &&
+                      def.key !== "semantic_links"
+                    }
+                  >
                     <summary className="cursor-pointer text-muted-foreground">
                       Rohdaten (JSON)
                     </summary>

@@ -5,6 +5,7 @@
  *   node scripts/dev-db.mjs build            → schreibt db-export/dev-setup.sql (für den SQL-Editor)
  *   node scripts/dev-db.mjs status           → zeigt, ob die Dev-DB eingerichtet ist
  *   node scripts/dev-db.mjs setup            → richtet die leere Dev-DB ein (Schema, Stammdaten, Prompts)
+ *   node scripts/dev-db.mjs migrate <datei>  → führt eine einzelne Migration aus drizzle/migrations/ aus
  *   node scripts/dev-db.mjs admin <e-mail>   → macht einen bereits angemeldeten Nutzer zum Admin
  *
  * Verbindung: SUPABASE_DB_URL_dev (Connection String der Dev-DB, nur in .env.local).
@@ -41,11 +42,18 @@ const DEV_ID = env.SUPABASE_PROJECT_ID_dev ?? "";
 function buildSetupSql() {
   let setup = readFileSync(join(ROOT, "db-export/setup.sql"), "utf8");
   // Rollen-Seeds des Quellprojekts verweisen auf fremde auth.users → in Dev weglassen.
-  setup = setup.replace(/^INSERT INTO public\.user_roles VALUES .*$/gm, "-- (user_roles-Seed in Dev ausgelassen)");
+  setup = setup.replace(
+    /^INSERT INTO public\.user_roles VALUES .*$/gm,
+    "-- (user_roles-Seed in Dev ausgelassen)",
+  );
   const m0009 = readFileSync(join(ROOT, "drizzle/migrations/0009_workspaces.sql"), "utf8");
   const m0010 = readFileSync(join(ROOT, "drizzle/migrations/0010_simplified_pipeline.sql"), "utf8");
   const m0011 = readFileSync(join(ROOT, "drizzle/migrations/0011_prompt_quality_v2.sql"), "utf8");
-  const m0012 = readFileSync(join(ROOT, "drizzle/migrations/0012_link_integration_prompt.sql"), "utf8");
+  const m0012 = readFileSync(
+    join(ROOT, "drizzle/migrations/0012_link_integration_prompt.sql"),
+    "utf8",
+  );
+  const m0013 = readFileSync(join(ROOT, "drizzle/migrations/0013_content_pages.sql"), "utf8");
   return [
     "-- ============================================================",
     "-- dev-setup.sql – erzeugt mit `node scripts/dev-db.mjs build`",
@@ -55,6 +63,7 @@ function buildSetupSql() {
     "--         + drizzle/migrations/0010_simplified_pipeline.sql",
     "--         + drizzle/migrations/0011_prompt_quality_v2.sql",
     "--         + drizzle/migrations/0012_link_integration_prompt.sql",
+    "--         + drizzle/migrations/0013_content_pages.sql",
     "-- ============================================================",
     "",
     setup,
@@ -71,6 +80,9 @@ function buildSetupSql() {
     "-- ============== 0012_link_integration_prompt ===============",
     m0012,
     "",
+    "-- ================= 0013_content_pages =====================",
+    m0013,
+    "",
   ].join("\n");
 }
 
@@ -83,8 +95,12 @@ function guardedUrl() {
     );
   }
   if (!DEV_ID) fail("SUPABASE_PROJECT_ID_dev fehlt (.env).");
-  if (!url.includes(DEV_ID)) fail("Abbruch: SUPABASE_DB_URL_dev gehört nicht zum Dev-Projekt (Projekt-ID fehlt in der URL).");
-  if (PROD_ID && url.includes(PROD_ID)) fail("Abbruch: SUPABASE_DB_URL_dev zeigt auf das PROD-Projekt.");
+  if (!url.includes(DEV_ID))
+    fail(
+      "Abbruch: SUPABASE_DB_URL_dev gehört nicht zum Dev-Projekt (Projekt-ID fehlt in der URL).",
+    );
+  if (PROD_ID && url.includes(PROD_ID))
+    fail("Abbruch: SUPABASE_DB_URL_dev zeigt auf das PROD-Projekt.");
   if (PROD_ID && PROD_ID === DEV_ID) fail("Abbruch: Dev- und Prod-Projekt-ID sind identisch.");
   return url;
 }
@@ -119,17 +135,30 @@ if (cmd === "build") {
       const [m] = await sql`select count(*)::int as n from public.markets`;
       const prompts = await sql`
         select step_key, version from public.prompt_templates
-        where step_key in ('localization_scan','localize_document','localization_review','link_integration') order by sort_order`;
+        where step_key in ('localization_scan','localize_document','localization_review','link_integration','semantic_link_keywords') order by sort_order`;
       const [col] = await sql`
         select count(*)::int as n from information_schema.columns
         where table_schema='public' and table_name='markets' and column_name='localization_notes'`;
       const [ws] = await sql`select count(*)::int as n from public.workspaces`;
+      const [cp] = await sql`
+        select to_regclass('public.content_pages') is not null as ok`;
+      const [vec] = await sql`
+        select exists (select 1 from pg_extension where extname = 'vector') as ok`;
       const admins = await sql`
         select p.email from public.workspace_members wm
         join public.profiles p on p.id = wm.user_id where wm.role = 'admin'`;
-      console.log(`Märkte: ${m.n} · Arbeitsbereiche: ${ws.n} · localization_notes: ${col.n ? "ja" : "nein"}`);
-      console.log(`Pipeline-Prompts: ${prompts.map((p) => `${p.step_key} v${p.version}`).join(", ") || "keine"}`);
-      console.log(`Admins: ${admins.map((a) => a.email).join(", ") || "keine – `node scripts/dev-db.mjs admin <e-mail>`"}`);
+      console.log(
+        `Märkte: ${m.n} · Arbeitsbereiche: ${ws.n} · localization_notes: ${col.n ? "ja" : "nein"}`,
+      );
+      console.log(
+        `content_pages: ${cp.ok ? "vorhanden" : "fehlt (migrate 0013_content_pages.sql)"} · pgvector: ${vec.ok ? "aktiv" : "fehlt"}`,
+      );
+      console.log(
+        `Pipeline-Prompts: ${prompts.map((p) => `${p.step_key} v${p.version}`).join(", ") || "keine"}`,
+      );
+      console.log(
+        `Admins: ${admins.map((a) => a.email).join(", ") || "keine – `node scripts/dev-db.mjs admin <e-mail>`"}`,
+      );
     }
   } finally {
     await sql.end();
@@ -138,12 +167,29 @@ if (cmd === "build") {
   const sql = await connect();
   try {
     if (await isInitialized(sql)) {
-      fail("Dev-DB ist bereits eingerichtet (public.markets existiert). Abbruch, um nichts doppelt anzulegen.");
+      fail(
+        "Dev-DB ist bereits eingerichtet (public.markets existiert). Abbruch, um nichts doppelt anzulegen.",
+      );
     }
     await sql.begin((tx) => tx.unsafe(buildSetupSql()));
-    console.log("Dev-DB eingerichtet (Schema, Märkte, Prompts, Workspaces, Migration 0010).");
+    console.log(
+      "Dev-DB eingerichtet (Schema, Märkte, Prompts, Workspaces, Migrationen 0010–0013).",
+    );
     console.log("Nächster Schritt: eigenen Nutzer in Supabase Auth (Dev) anlegen, dann");
     console.log("  node scripts/dev-db.mjs admin <deine-e-mail>");
+  } finally {
+    await sql.end();
+  }
+} else if (cmd === "migrate") {
+  if (!arg)
+    fail("Datei fehlt: node scripts/dev-db.mjs migrate <datei> (z. B. 0013_content_pages.sql)");
+  const file = arg.endsWith(".sql") ? arg : `${arg}.sql`;
+  const path = join(ROOT, "drizzle/migrations", file);
+  if (!existsSync(path)) fail(`Migration nicht gefunden: drizzle/migrations/${file}`);
+  const sql = await connect();
+  try {
+    await sql.begin((tx) => tx.unsafe(readFileSync(path, "utf8")));
+    console.log(`Migration angewendet: ${file}`);
   } finally {
     await sql.end();
   }
@@ -152,10 +198,13 @@ if (cmd === "build") {
   const sql = await connect();
   try {
     const [user] = await sql`select id from auth.users where lower(email) = lower(${arg})`;
-    if (!user) fail(`Kein Nutzer mit ${arg} in auth.users der Dev-DB. Zuerst in Supabase Auth anlegen.`);
+    if (!user)
+      fail(`Kein Nutzer mit ${arg} in auth.users der Dev-DB. Zuerst in Supabase Auth anlegen.`);
     await sql`insert into public.profiles (id, email) values (${user.id}, ${arg}) on conflict (id) do nothing`;
     let [ws] = await sql`select id from public.workspaces order by created_at asc limit 1`;
-    if (!ws) [ws] = await sql`insert into public.workspaces (name, created_by) values ('Standard', ${user.id}) returning id`;
+    if (!ws)
+      [ws] =
+        await sql`insert into public.workspaces (name, created_by) values ('Standard', ${user.id}) returning id`;
     await sql`
       insert into public.workspace_members (workspace_id, user_id, role)
       values (${ws.id}, ${user.id}, 'admin')
@@ -165,5 +214,5 @@ if (cmd === "build") {
     await sql.end();
   }
 } else {
-  console.log("Befehle: build | status | setup | admin <e-mail>");
+  console.log("Befehle: build | status | setup | migrate <datei> | admin <e-mail>");
 }

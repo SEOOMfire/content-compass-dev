@@ -5,7 +5,7 @@
  * das Modell liefert nur den Text je Block. Markdown rendert ausschließlich der Code.
  */
 
-export type StepKey = "extract" | "scan" | "localize" | "review" | "links";
+export type StepKey = "extract" | "scan" | "localize" | "review" | "links" | "semantic_links";
 
 export interface StepDef {
   key: StepKey;
@@ -55,6 +55,14 @@ export const PIPELINE: StepDef[] = [
     promptKey: "link_integration",
     description:
       "Interne Links der Quelle auf ein hreflang-Pendant für das Zielland prüfen und den ersten Treffer genau einmal in den Text setzen.",
+  },
+  {
+    key: "semantic_links",
+    order: 6,
+    label: "6 · Semantische Links",
+    promptKey: "semantic_link_keywords",
+    description:
+      "Passende Zielseiten aus dem eigenen Index (pgvector) je Ankertext suchen, per KI bewerten und die besten Links automatisch einsetzen.",
   },
 ];
 
@@ -198,6 +206,33 @@ export interface LinkingResult {
   warnings: string[];
 }
 
+/** Ein Zielseiten-Kandidat für ein Keyword (aus dem Index + KI-Bewertung). */
+export interface SemanticCandidate {
+  url: string;
+  title: string | null;
+  similarity: number;
+  probability: number | null;
+}
+
+/** Ein Ankertext-Vorschlag (Keyword) mit Suchintention und Kandidaten. */
+export interface SemanticKeyword {
+  block_id: string;
+  keyword: string;
+  intent: string;
+  candidates: SemanticCandidate[];
+  chosen: { url: string; similarity: number; probability: number } | null;
+  note?: string;
+}
+
+/** Ergebnis von Schritt 6 (semantische interne Verlinkung). */
+export interface SemanticLinkingResult {
+  keywords: SemanticKeyword[];
+  /** Eingesetzte Links (Block, Ankertext, Ziel-URL). */
+  inserted: { block_id: string; keyword: string; url: string }[];
+  notes: string[];
+  warnings: string[];
+}
+
 export interface JobContext {
   source?: SourceDoc;
   findings?: Finding[];
@@ -205,6 +240,7 @@ export interface JobContext {
   review?: ReviewResult;
   exportMarkdown?: string;
   linking?: LinkingResult;
+  semanticLinking?: SemanticLinkingResult;
 }
 
 /**
@@ -218,6 +254,7 @@ export const STEP_CONTEXT_KEYS: Record<StepKey, (keyof JobContext)[]> = {
   localize: ["localized"],
   review: ["review", "exportMarkdown"],
   links: ["linking"],
+  semantic_links: ["semanticLinking"],
 };
 
 /**

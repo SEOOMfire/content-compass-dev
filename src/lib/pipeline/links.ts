@@ -25,7 +25,7 @@ export const LINK_CHECK_BUDGET_MS = 90_000;
 /** Gezielte Nachfragen, wenn das Modell den Link nicht korrekt einsetzt. */
 export const MAX_LINK_RETRIES = 1;
 /** Nur in diesen Blocktypen wird ein Link gesetzt (keine Überschriften/Tabellen). */
-const LINKABLE_TYPES = new Set<Block["type"]>(["paragraph", "list", "quote"]);
+export const LINKABLE_TYPES = new Set<Block["type"]>(["paragraph", "list", "quote"]);
 
 export interface FetchedPage {
   status: number;

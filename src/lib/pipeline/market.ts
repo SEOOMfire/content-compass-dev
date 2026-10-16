@@ -61,6 +61,17 @@ export function isGermanTarget(m: Pick<MarketProfile, "language" | "locale">): b
   return /^(deutsch|german)/i.test(m.language.trim()) || /^de(-|_|$)/i.test(m.locale ?? "");
 }
 
+/**
+ * Locale in Sprache + Land zerlegen: „fr-CH“ → { language: "fr", country: "ch" }.
+ * Null bei fehlender oder nicht zerlegbarer Locale.
+ */
+export function localeParts(locale: string | null): { language: string; country: string } | null {
+  if (!locale) return null;
+  const m = /^\s*([a-zA-Z]{2,3})[-_]([a-zA-Z]{2})\s*$/.exec(locale.trim());
+  if (!m) return null;
+  return { language: m[1]!.toLowerCase(), country: m[2]!.toLowerCase() };
+}
+
 /** Schweizer Hochdeutsch: kein „ß“. */
 export function forbidsEszett(
   m: Pick<MarketProfile, "language" | "locale" | "country" | "forbidden_claims">,

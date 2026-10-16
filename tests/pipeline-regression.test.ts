@@ -741,13 +741,21 @@ describe("review", () => {
 // ---------------------------------------------------------------------------
 
 describe("pipeline", () => {
-  test("genau 5 Schritte in fester Reihenfolge", () => {
-    expect(PIPELINE.map((s) => s.key)).toEqual(["extract", "scan", "localize", "review", "links"]);
+  test("genau 6 Schritte in fester Reihenfolge", () => {
+    expect(PIPELINE.map((s) => s.key)).toEqual([
+      "extract",
+      "scan",
+      "localize",
+      "review",
+      "links",
+      "semantic_links",
+    ]);
     expect(PIPELINE.filter((s) => s.promptKey).map((s) => s.promptKey)).toEqual([
       "localization_scan",
       "localize_document",
       "localization_review",
       "link_integration",
+      "semantic_link_keywords",
     ]);
   });
 
@@ -774,6 +782,18 @@ describe("pipeline", () => {
     expect(dependencyBlocker("links", { source, findings: [], localized })).toContain("Schritt 4");
     expect(
       dependencyBlocker("links", {
+        source,
+        findings: [],
+        localized,
+        review: { issues: [], applied: [], warnings: [] },
+        exportMarkdown: "x",
+      }),
+    ).toBeNull();
+    expect(dependencyBlocker("semantic_links", { source, findings: [], localized })).toContain(
+      "Schritt 4",
+    );
+    expect(
+      dependencyBlocker("semantic_links", {
         source,
         findings: [],
         localized,

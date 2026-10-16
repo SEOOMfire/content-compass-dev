@@ -1,4 +1,4 @@
-# Lokalisierungs-Pipeline (5 Schritte)
+# Lokalisierungs-Pipeline (6 Schritte)
 
 Aus einer deutschen Fressnapf-URL entsteht für einen Zielmarkt ein **strukturtreues
 Markdown-Dokument**: gleiche Überschriften und Ebenen, Absätze bleiben Absätze, Listen
@@ -17,6 +17,7 @@ keine Liste, Tabelle oder Überschrift erfinden oder zerstören.
 | 3 | `localize` | KI `localize_document` + gezielte Nachfrage | `localized: { meta, blocks }` |
 | 4 | `review` | Code-Prüfungen + KI `localization_review` + Render | `review`, `exportMarkdown` |
 | 5 | `links` | Code (hreflang) + KI `link_integration` + Render | `linking`, `exportMarkdown` (neu gerendert) |
+| 6 | `semantic_links` | Code (Index + Decisions) + KI `semantic_link_keywords` + Render | `semanticLinking`, `exportMarkdown` (neu gerendert) |
 
 Abhängigkeiten sind linear: Schritt n braucht das Ergebnis von Schritt n−1. Läuft ein
 Schritt neu, werden die Ergebnisse aller späteren Schritte verworfen und ihre Karten auf
@@ -46,7 +47,8 @@ type Finding = {
 
 Texte sind Inline-Markdown: nur `**fett**` und `*kursiv*`; Links werden zu reinem Ankertext.
 Die internen Linkziele der Quelle stehen separat in `source.links` (`{ block_id, href, anchor }`).
-Einzige Ausnahme im Text: Schritt 5 setzt höchstens einen Markdown-Link `[Anker](URL)`.
+Ausnahmen im Text: Schritt 5 setzt höchstens einen Markdown-Link `[Anker](URL)`, Schritt 6 setzt
+bis zu fünf weitere `[Anker](URL)` per Code.
 
 ## 1 · `extract` – Quelle extrahieren (Code)
 
@@ -165,9 +167,58 @@ Datei: `src/lib/pipeline/links.ts`
   Vorlage oder Quellen ohne Linkdaten (vor Schritt 5 extrahiert → Schritt 1 neu ausführen)
   sind Warnungen.
 
+## 6 · `semantic_links` – Semantische interne Verlinkung (Code + KI + Index)
+
+Datei: `src/lib/pipeline/semantic-links.ts`, Helfer `embeddings.server.ts` und
+`decisions.server.ts`, Konstanten in `semantic-links.config.ts`.
+
+- **Basis:** `localized.blocks` mit dem Schritt-5-Link (`linking.patched_block`) angewendet.
+- **Keywords:** KI `semantic_link_keywords` liefert `[{ block_id, keyword, intent }]` für
+  verlinkbare Blöcke (Absatz/Liste/Zitat, nicht gestrichen, ohne bestehenden Link). Der Code
+  validiert: Keyword steht wörtlich im Block, Block verlinkbar, nicht schon verlinkt; Dedupe;
+  höchstens `MAX_KEYWORDS` (10). Produkt-/Kategoriebegriffe schließt der Systemprompt aus.
+- **Index:** Die Suchintents werden in einem Batch eingebettet (`text-embedding-3-small`) und
+  über die RPC `public.match_content_pages` gegen `content_pages` gesucht (Land + Sprache aus
+  `markets.locale`, bereits verlinkte URLs inkl. Schritt-5-Ziel ausgeschlossen, `CANDIDATES` = 20).
+- **Bewertung:** Je (Keyword, Kandidat) eine predicate-Frage an die Decisions API
+  (`POST /v1/decisions`, Modell per `OPENAI_DECISIONS_MODEL`, Default `gpt-6-luna`) →
+  `probability` 0–1. Concurrency-Limit 20, Retry; Refusal/Fehler → Score `null`, blockiert nicht.
+- **Auswahl (gierig):** Keywords nach bestem Score sortiert; URL einmal, Block einmal,
+  ≤ `MAX_LINKS` (5), Score ≥ `THRESHOLD` (0.80).
+- **Einsetzen (per Code, kein LLM):** erstes Vorkommen des Keywords außerhalb bestehender
+  `[..](..)` wird zu `[Keyword](URL)`; Text ohne Link-Syntax bleibt unverändert.
+- **Export:** `exportMarkdown` wird aus den gepatchten Blöcken neu gerendert; `localized` bleibt
+  unverändert – ein Neulauf von Schritt 5 oder 6 startet immer vom Stand nach Schritt 4.
+- Der Schritt blockiert nie: Fehler bei Embedding/Index/Decisions erscheinen als Hinweis/Warnung,
+  der Export bleibt dann ohne (weitere) Links. Alle Kandidaten + Scores stehen im Ergebnis.
+
+## Indexierung (`content_pages`)
+
+Der Ziel-Index wird außerhalb der Job-Pipeline aufgebaut – lokal mit
+`scripts/content-index.mjs` (Node, `postgres` + `fetch`; das Vercel-Limit von 300 s gilt nicht):
+
+- `node scripts/content-index.mjs crawl [--market fr-CH] [--limit N] [--force]`
+- `node scripts/content-index.mjs status`
+
+Ablauf je Markt: `robots.txt` → Sitemap-Index → nur `sitemap-content-{lang}.xml` (Fallback:
+alle Sitemaps + Pfadfilter). Harte Filter: URL unter Markt-Präfix + `magazine_root`, Ausschluss
+`product|category|cart|checkout|search|promotions|newsletter|store` u. ä. Inkrementell über
+`sitemap_lastmod` (bzw. `--force`). Scraping mit UA `OMfireLocalizationBot/1.0`, Concurrency 3;
+Payload = H1 + Meta-Description + Blöcke (Überschriften als `## …`). `content_type`: `hub` bei
+Kategorie-Übersicht (Pfadtiefe ≤ `magazine_root`+1 oder < 250 Wörter), sonst `ratgeber`.
+Re-Embedding nur bei geändertem `content_hash` (sha256), Batch à 100; Upsert `on conflict (url)`;
+URLs, die nicht mehr in der Sitemap stehen, werden `is_active = false`. Abschluss-Report je Markt
++ Tabellengröße (`pg_total_relation_size`).
+
+Tabelle `public.content_pages` (Migration `0013_content_pages.sql`): `url unique`, `market_id`,
+`country`/`language` (aus `markets.locale`), `content_type`, `title`/`h1`/`meta_description`,
+`content_payload`, `content_hash`, `embedding halfvec(1536)` (HNSW-Index), `is_active`,
+`sitemap_lastmod`, `http_status`. Die RPC `match_content_pages` ist nur für `service_role`
+freigegeben. Die Altlast `url_index` bleibt unangetastet.
+
 ## Job-Status
 
-`done` nach Schritt 5, bzw. `done_with_errors`, wenn Warnungen aus Schritt 4 oder 5 offen sind.
+`done` nach Schritt 6, bzw. `done_with_errors`, wenn Warnungen aus Schritt 4, 5 oder 6 offen sind.
 
 ## Marktprofil
 
@@ -186,4 +237,6 @@ Altjobs: ein vorhandener Export bleibt sichtbar, alte Schrittzeilen werden ignor
 
 `bun test` – `tests/pipeline-regression.test.ts` mit den Fixtures
 `tests/fixtures/synthetic.html` und `tests/fixtures/barbet.html` (Extraktion, Rendering,
-Validierung, Scan-Normalisierung, gezielter Retry mit gemocktem Modell, Review).
+Validierung, Scan-Normalisierung, gezielter Retry mit gemocktem Modell, Review), dazu
+`tests/pipeline-links.test.ts` (Schritt 5), `tests/semantic-links.test.ts` (Schritt 6) und
+`tests/content-index.test.ts` (Sitemap-Filter, Payload-Aufbau, hub/ratgeber-Klassifikation).

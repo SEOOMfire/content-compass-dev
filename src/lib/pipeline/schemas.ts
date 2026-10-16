@@ -79,6 +79,18 @@ export const LinkPatchSchema = z.object({
   items: z.array(ListItemInputSchema).optional(),
 });
 
+/** Schritt 6 · semantic_link_keywords: Ankertext-Vorschläge je Block. */
+export const SemanticKeywordInputSchema = z.object({
+  block_id: z.string().min(1),
+  keyword: z.string().min(1),
+  intent: z.string().default(""),
+});
+
+/** Schritt 6 · semantic_link_keywords */
+export const SemanticKeywordsOutputSchema = z.object({
+  keywords: z.array(SemanticKeywordInputSchema).default([]),
+});
+
 export class StepSchemaError extends Error {}
 
 /** Validiert eine Schrittausgabe. Verstoß = Fehler, kein stiller Fallback. */

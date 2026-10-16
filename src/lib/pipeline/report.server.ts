@@ -24,7 +24,9 @@ function cell(s: string | null | undefined): string {
 }
 
 /** Baut den vollständigen Prozess-Report eines Jobs als Markdown. */
-export async function buildJobReport(jobId: string): Promise<{ filename: string; markdown: string }> {
+export async function buildJobReport(
+  jobId: string,
+): Promise<{ filename: string; markdown: string }> {
   const { data: job, error } = await supabaseAdmin
     .from("jobs")
     .select("*, markets(country,language,locale,domain,brand)")
@@ -38,9 +40,17 @@ export async function buildJobReport(jobId: string): Promise<{ filename: string;
     .eq("job_id", jobId)
     .order("step_order");
 
-  const market = (job as unknown as {
-    markets: { country?: string; language?: string; locale?: string; domain?: string; brand?: string } | null;
-  }).markets;
+  const market = (
+    job as unknown as {
+      markets: {
+        country?: string;
+        language?: string;
+        locale?: string;
+        domain?: string;
+        brand?: string;
+      } | null;
+    }
+  ).markets;
   const jobRow = job as unknown as {
     id: string;
     source_url: string;
@@ -68,10 +78,16 @@ export async function buildJobReport(jobId: string): Promise<{ filename: string;
   out.push(`# Prozess-Report · ${jobRow.source_url}`);
   out.push("");
   out.push(`- **Job-ID:** \`${jobRow.id}\``);
-  out.push(`- **Zielmarkt:** ${market?.country ?? "—"} · ${market?.language ?? "—"} · ${market?.domain ?? "—"}`);
-  out.push(`- **Job-Status:** ${jobRow.status}${jobRow.current_step ? ` (aktueller Schritt: ${jobRow.current_step})` : ""}`);
+  out.push(
+    `- **Zielmarkt:** ${market?.country ?? "—"} · ${market?.language ?? "—"} · ${market?.domain ?? "—"}`,
+  );
+  out.push(
+    `- **Job-Status:** ${jobRow.status}${jobRow.current_step ? ` (aktueller Schritt: ${jobRow.current_step})` : ""}`,
+  );
   if (isLegacyContext(ctx)) {
-    out.push("- **Hinweis:** Altjob aus der früheren Pipeline – „Komplett ausführen“ erzeugt ihn neu.");
+    out.push(
+      "- **Hinweis:** Altjob aus der früheren Pipeline – „Komplett ausführen“ erzeugt ihn neu.",
+    );
   }
   out.push(`- **Erstellt:** ${jobRow.created_at} · **Aktualisiert:** ${jobRow.updated_at ?? "—"}`);
   out.push(`- **Report erzeugt:** ${new Date().toISOString()}`);
@@ -149,7 +165,9 @@ export async function buildJobReport(jobId: string): Promise<{ filename: string;
     out.push("| Block | Herkunft | Befund | Status | Hinweis |");
     out.push("| --- | --- | --- | --- | --- |");
     for (const i of issues) {
-      out.push(`| ${i.block_id ?? "Dokument"} | ${i.origin} | ${cell(i.problem)} | ${i.status} | ${cell(i.note)} |`);
+      out.push(
+        `| ${i.block_id ?? "Dokument"} | ${i.origin} | ${cell(i.problem)} | ${i.status} | ${cell(i.note)} |`,
+      );
     }
   }
   out.push("");
@@ -182,13 +200,47 @@ export async function buildJobReport(jobId: string): Promise<{ filename: string;
   }
   out.push("");
 
+  out.push("## Semantische Links (Schritt 6)");
+  out.push("");
+  const semanticLinking = ctx.semanticLinking;
+  if (!semanticLinking) {
+    out.push("_Noch nicht ausgeführt._");
+  } else if (!semanticLinking.keywords.length) {
+    out.push("_Keine Keywords extrahiert._");
+  } else {
+    out.push(
+      `- Eingesetzt: ${semanticLinking.inserted.length} Link(s) aus ${semanticLinking.keywords.length} Keyword(s).`,
+    );
+    for (const w of semanticLinking.warnings) out.push(`- Warnung: ${w}`);
+    for (const n of semanticLinking.notes) out.push(`- Hinweis: ${n}`);
+    out.push("");
+    out.push("| Block | Keyword | Intent | Gewählter Link | Wahrscheinlichkeit | Ähnlichkeit |");
+    out.push("| --- | --- | --- | --- | --- | --- |");
+    for (const k of semanticLinking.keywords) {
+      const chosen = k.chosen ? `[${k.keyword}](${k.chosen.url})` : (k.note ?? "—");
+      out.push(
+        `| ${k.block_id} | ${cell(k.keyword)} | ${cell(k.intent)} | ${cell(chosen)} | ${k.chosen?.probability?.toFixed(3) ?? "—"} | ${k.chosen?.similarity?.toFixed(3) ?? "—"} |`,
+      );
+      for (const c of k.candidates.slice(0, 3)) {
+        out.push(
+          `| · | · | · | ${cell(c.url)} | ${c.probability?.toFixed(3) ?? "—"} | ${c.similarity?.toFixed(3) ?? "—"} |`,
+        );
+      }
+    }
+  }
+  out.push("");
+
   out.push("## Job-Kontext (Endstand)");
   out.push(json(ctx, 20000));
   out.push("");
 
   out.push("## Export-Markdown");
   out.push("");
-  out.push(ctx.exportMarkdown ? "```markdown\n" + ctx.exportMarkdown + "\n```" : "_Noch kein Export vorhanden._");
+  out.push(
+    ctx.exportMarkdown
+      ? "```markdown\n" + ctx.exportMarkdown + "\n```"
+      : "_Noch kein Export vorhanden._",
+  );
   out.push("");
 
   const unknownSteps = rows.filter((s) => !STEP_BY_KEY[s.step_key]);

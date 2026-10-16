@@ -9,6 +9,9 @@ import {
 } from "./types";
 import { extractSource, fetchHtml } from "./extract.server";
 import { linkDocument } from "./links";
+import { semanticLinkDocument, type MatchPage } from "./semantic-links";
+import { embedTexts } from "./embeddings.server";
+import { decidePredicate } from "./decisions.server";
 import { renderMarkdown } from "./render";
 import {
   runPrompt,
@@ -277,6 +280,68 @@ export async function runStep(
       };
     }
 
+    case "semantic_links": {
+      requireSource(ctx);
+      if (!ctx.localized) throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+      // Fehlt die Vorlage, wird das als Warnung geführt – der Export bleibt dann ohne Zusatz-Links.
+      let call: PromptCall;
+      try {
+        call = promptCall(await loadTemplate("semantic_link_keywords"));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Prompt-Template fehlt";
+        call = async () => {
+          throw new Error(`${message} (Migration 0013 ausführen)`);
+        };
+      }
+      const matchPages = async (args: {
+        embedding: number[];
+        country: string;
+        language: string;
+        excludeUrls: string[];
+        limit: number;
+      }): Promise<MatchPage[]> => {
+        const rpc = supabaseAdmin.rpc as unknown as (
+          fn: string,
+          args: Record<string, unknown>,
+        ) => Promise<{ data: unknown; error: { message: string } | null }>;
+        const { data, error } = await rpc("match_content_pages", {
+          query_embedding: `[${args.embedding.join(",")}]`,
+          p_country: args.country,
+          p_language: args.language,
+          p_match_count: args.limit,
+          p_content_types: ["ratgeber"],
+          p_exclude_urls: args.excludeUrls,
+        });
+        if (error) throw new Error(error.message);
+        return ((data ?? []) as Array<Record<string, unknown>>).map((r) => ({
+          url: String(r["url"] ?? ""),
+          title: typeof r["title"] === "string" ? r["title"] : null,
+          content_payload: String(r["content_payload"] ?? ""),
+          similarity: Number(r["similarity"] ?? 0),
+        }));
+      };
+      const res = await semanticLinkDocument({
+        localized: ctx.localized,
+        ...(ctx.linking ? { linking: ctx.linking } : {}),
+        market,
+        call,
+        matchPages,
+        embed: (texts) => embedTexts(texts),
+        decide: (args) => decidePredicate({ input: args.payload, instructions: args.instructions }),
+      });
+      const exportMarkdown = renderMarkdown(res.blocks, ctx.localized.meta, {
+        closing_note: market.closing_note,
+      });
+      return {
+        output: { ...res.semanticLinking, export_length: exportMarkdown.length },
+        context: { semanticLinking: res.semanticLinking, exportMarkdown },
+        ...(res.stats.model ? { model: res.stats.model } : {}),
+        ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
+        tokensIn: res.stats.tokensIn,
+        tokensOut: res.stats.tokensOut,
+      };
+    }
+
     default:
       throw new Error(`Unbekannter Schritt: ${stepKey}`);
   }
@@ -432,7 +497,10 @@ async function syncJobStatus(jobId: string, ctx: JobContext) {
   const problems = rows.filter((s) => s.status === "error" || s.status === "blocked").length;
   const lastStep = PIPELINE[PIPELINE.length - 1]!.key;
   const finished = rows.find((s) => s.step_key === lastStep)?.status === "done";
-  const warnings = (ctx.review?.warnings?.length ?? 0) + (ctx.linking?.warnings?.length ?? 0);
+  const warnings =
+    (ctx.review?.warnings?.length ?? 0) +
+    (ctx.linking?.warnings?.length ?? 0) +
+    (ctx.semanticLinking?.warnings?.length ?? 0);
   const status = finished
     ? problems || warnings
       ? "done_with_errors"
@@ -521,6 +589,12 @@ function describeStepInput(
         domain: market.domain,
         internal_links: ctx.source?.links?.length ?? null,
         links: (ctx.source?.links ?? []).slice(0, 30),
+      };
+    case "semantic_links":
+      return {
+        locale: market.locale,
+        linkable_blocks: (ctx.localized?.blocks ?? []).filter((b) => !b.removed).length,
+        step5_link: ctx.linking?.chosen?.target_href ?? null,
       };
     default:
       return {};
