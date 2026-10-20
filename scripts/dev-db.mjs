@@ -54,6 +54,10 @@ function buildSetupSql() {
     "utf8",
   );
   const m0013 = readFileSync(join(ROOT, "drizzle/migrations/0013_content_pages.sql"), "utf8");
+  const m0014 = readFileSync(
+    join(ROOT, "drizzle/migrations/0014_prompt_dynamic_sections.sql"),
+    "utf8",
+  );
   return [
     "-- ============================================================",
     "-- dev-setup.sql – erzeugt mit `node scripts/dev-db.mjs build`",
@@ -64,6 +68,7 @@ function buildSetupSql() {
     "--         + drizzle/migrations/0011_prompt_quality_v2.sql",
     "--         + drizzle/migrations/0012_link_integration_prompt.sql",
     "--         + drizzle/migrations/0013_content_pages.sql",
+    "--         + drizzle/migrations/0014_prompt_dynamic_sections.sql",
     "-- ============================================================",
     "",
     setup,
@@ -82,6 +87,9 @@ function buildSetupSql() {
     "",
     "-- ================= 0013_content_pages =====================",
     m0013,
+    "",
+    "-- ============ 0014_prompt_dynamic_sections =================",
+    m0014,
     "",
   ].join("\n");
 }
@@ -173,7 +181,7 @@ if (cmd === "build") {
     }
     await sql.begin((tx) => tx.unsafe(buildSetupSql()));
     console.log(
-      "Dev-DB eingerichtet (Schema, Märkte, Prompts, Workspaces, Migrationen 0010–0013).",
+      "Dev-DB eingerichtet (Schema, Märkte, Prompts, Workspaces, Migrationen 0010–0014).",
     );
     console.log("Nächster Schritt: eigenen Nutzer in Supabase Auth (Dev) anlegen, dann");
     console.log("  node scripts/dev-db.mjs admin <deine-e-mail>");

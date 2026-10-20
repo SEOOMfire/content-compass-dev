@@ -16,7 +16,7 @@ export interface BlockContent {
 }
 
 export interface ValidateOptions {
-  /** Block ist in einem `streichen`-Finding referenziert. */
+  /** Liste darf weniger Punkte haben (nur bei `streichen`-Finding). */
   removable: boolean;
   /** Zielsprache = Quellsprache (Deutsch) → identischer Text ist erlaubt. */
   sameLanguage: boolean;
@@ -146,12 +146,8 @@ export function validateBlockPatch(
 ): ValidationResult {
   const errors: string[] = [];
   if (patch.removed === true) {
-    if (!opts.removable) {
-      return {
-        ok: false,
-        errors: [`${source.id}: "removed" ist nur bei einem streichen-Finding erlaubt`],
-      };
-    }
+    // Ganze Blöcke dürfen entfernt werden: `streichen`-Funde und dynamische,
+    // nicht-redaktionelle Abschnitte (Produktvorschläge/Tools, siehe Prompt-Regel 12).
     return { ok: true, block: { ...source, removed: true } };
   }
 

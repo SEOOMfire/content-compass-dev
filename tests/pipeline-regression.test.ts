@@ -342,10 +342,11 @@ describe("validate", () => {
     expect(blockSyntaxProblem("| a | b |")).not.toBeNull();
   });
 
-  test("removed ohne streichen-Finding → Fehler, mit Finding → ok", () => {
-    expect(validateBlockPatch(para, { removed: true }, opts).ok).toBe(false);
-    const res = validateBlockPatch(para, { removed: true }, { ...opts, removable: true });
-    expect(res).toEqual({ ok: true, block: { ...para, removed: true } });
+  test("removed ist für ganze Blöcke immer erlaubt", () => {
+    expect(validateBlockPatch(para, { removed: true }, opts)).toEqual({
+      ok: true,
+      block: { ...para, removed: true },
+    });
   });
 
   test("Listenpunkte dürfen nur bei streichen entfallen", () => {
@@ -469,7 +470,11 @@ describe("scan · normalizeFindings", () => {
   test("ersetzen/neutral gelten für alle Vorkommen, streichen bleibt auf gemeldete Blöcke beschränkt", () => {
     const doc: Block[] = [
       { id: "b1", type: "heading", level: 2, text: "Das Wasserschwein im Wasser" },
-      { id: "b2", type: "paragraph", text: "Im deutschsprachigen Raum heißt es auch Wasserschwein." },
+      {
+        id: "b2",
+        type: "paragraph",
+        text: "Im deutschsprachigen Raum heißt es auch Wasserschwein.",
+      },
       { id: "b3", type: "list", ordered: false, items: [{ text: "Wasserschweine sind gesellig" }] },
       { id: "b4", type: "paragraph", text: "Infos gibt es beim Amt XY." },
       { id: "b5", type: "paragraph", text: "Auch das Amt XY berät." },
