@@ -123,6 +123,19 @@ export const runStepFn = createServerFn({ method: "POST" })
     };
   });
 
+export const applySemanticLinksFn = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) =>
+    z.object({ jobId: z.string().uuid(), blockIds: z.array(z.string()) }).parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    const workspaceId = await getJobWorkspace(data.jobId);
+    await assertWorkspaceRole(context.userId, workspaceId, MANAGER_ROLES);
+    const { applySemanticLinksStep } = await import("@/lib/pipeline/engine.server");
+    const res = await applySemanticLinksStep(data.jobId, data.blockIds);
+    return res;
+  });
+
 export const exportJobReport = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => z.object({ jobId: z.string().uuid() }).parse(d))

@@ -5,6 +5,7 @@ import { describe, expect, test } from "bun:test";
 import {
   alreadyLinkedUrls,
   applyLinkingPatch,
+  applySemanticLinks,
   insertLinkIntoBlock,
   insertLinkIntoText,
   semanticLinkDocument,
@@ -163,7 +164,7 @@ describe("applyLinkingPatch / alreadyLinkedUrls", () => {
 });
 
 describe("semanticLinkDocument", () => {
-  test("setzt Links gierig: URL einmal, Score ≥ Schwelle", async () => {
+  test("erstellt Vorschlag (chosen + eligible) ohne Auto-Insert", async () => {
     const res = await semanticLinkDocument({
       localized: doc(baseBlocks()),
       market: CH,
@@ -172,19 +173,16 @@ describe("semanticLinkDocument", () => {
       matchPages: matchAll(),
       decide: decideByPayload({ A: 0.95, B: 0.6 }),
     });
-    // Alle Keywords liefern denselben besten Treffer (A), aber URL nur einmal.
-    expect(res.semanticLinking.inserted).toHaveLength(1);
-    expect(res.semanticLinking.inserted[0]).toMatchObject({
-      block_id: "b2",
-      url: "https://fressnapf.ch/fr/magazine/soins/",
-    });
-    expect(res.blocks[1]?.text).toContain(
-      "[toilette du chien](https://fressnapf.ch/fr/magazine/soins/)",
-    );
-    expect(res.semanticLinking.warnings).toEqual([]);
+    expect(res.semanticLinking.inserted).toEqual([]);
+    expect(res.semanticLinking.keywords).toHaveLength(3);
+    for (const k of res.semanticLinking.keywords) {
+      expect(k.eligible).toBe(true);
+      expect(k.chosen?.url).toBe("https://fressnapf.ch/fr/magazine/soins/");
+      expect(k.chosen?.probability).toBe(0.95);
+    }
   });
 
-  test("Threshold: keine Links, wenn alle Scores darunter liegen", async () => {
+  test("Threshold: unter Schwelle ist nicht eligible, chosen bleibt gesetzt", async () => {
     const res = await semanticLinkDocument({
       localized: doc(baseBlocks()),
       market: CH,
@@ -195,7 +193,8 @@ describe("semanticLinkDocument", () => {
       threshold: 0.8,
     });
     expect(res.semanticLinking.inserted).toEqual([]);
-    expect(res.semanticLinking.keywords.every((k) => k.chosen === null)).toBe(true);
+    expect(res.semanticLinking.keywords.every((k) => !k.eligible)).toBe(true);
+    expect(res.semanticLinking.keywords.every((k) => k.chosen?.probability === 0.5)).toBe(true);
   });
 
   test("Dedupe: zweites Keyword im selben Block wird verworfen", async () => {
@@ -287,5 +286,88 @@ describe("semanticLinkDocument", () => {
     });
     expect(res.semanticLinking.warnings.some((w) => w.includes("Locale"))).toBe(true);
     expect(res.semanticLinking.inserted).toEqual([]);
+  });
+});
+
+describe("applySemanticLinks", () => {
+  async function proposal() {
+    return semanticLinkDocument({
+      localized: doc(baseBlocks()),
+      market: CH,
+      call: mockCall(keywordResponse),
+      embed: embed3,
+      matchPages: matchAll(),
+      decide: decideByPayload({ A: 0.95, B: 0.6 }),
+    });
+  }
+
+  test("setzt nur gewählte Links ein, URL einmal", async () => {
+    const res = await proposal();
+    const applied = applySemanticLinks(doc(baseBlocks()), undefined, res.semanticLinking, [
+      "b2",
+      "b3",
+      "b4",
+    ]);
+    // Alle zeigen auf denselben besten Treffer (A) → URL nur einmal (b2 gewinnt).
+    expect(applied.inserted).toHaveLength(1);
+    expect(applied.inserted[0]).toMatchObject({
+      block_id: "b2",
+      url: "https://fressnapf.ch/fr/magazine/soins/",
+    });
+    expect(applied.blocks[1]?.text).toContain(
+      "[toilette du chien](https://fressnapf.ch/fr/magazine/soins/)",
+    );
+    expect(applied.blocks[2]?.text).not.toContain("https://fressnapf.ch");
+  });
+
+  test("ignoriert nicht gewählte und nicht eligible Keywords", async () => {
+    const res = await proposal();
+    const applied = applySemanticLinks(doc(baseBlocks()), undefined, res.semanticLinking, ["b2"]);
+    expect(applied.inserted).toHaveLength(1);
+    expect(applied.inserted[0]?.block_id).toBe("b2");
+    // Unter-Schwelle-Keyword: nicht eligible → auch bei Auswahl nicht gesetzt.
+    const low = {
+      ...res.semanticLinking,
+      keywords: res.semanticLinking.keywords.map((k) => ({
+        ...k,
+        eligible: k.block_id === "b3" ? false : k.eligible,
+      })),
+    };
+    const applied2 = applySemanticLinks(doc(baseBlocks()), undefined, low, ["b2", "b3"]);
+    expect(applied2.inserted.map((i) => i.block_id)).toEqual(["b2"]);
+  });
+
+  test("setzt mehrere Links, wenn Kandidaten unterschiedlich sind", async () => {
+    let call = 0;
+    const res = await semanticLinkDocument({
+      localized: doc(baseBlocks()),
+      market: CH,
+      call: mockCall({
+        keywords: [
+          { block_id: "b2", keyword: "toilette du chien", intent: "i1" },
+          { block_id: "b3", keyword: "alimentation du chiot", intent: "i2" },
+        ],
+      }),
+      embed: async () => [
+        [1, 0, 0],
+        [0, 1, 0],
+      ],
+      matchPages: async () => {
+        call += 1;
+        return call === 1
+          ? [{ url: "https://x/soins/", title: null, similarity: 0.9, content_payload: "A" }]
+          : [{ url: "https://x/nutrition/", title: null, similarity: 0.9, content_payload: "B" }];
+      },
+      decide: async () => ({ probability: 0.95 }),
+    });
+    const applied = applySemanticLinks(doc(baseBlocks()), undefined, res.semanticLinking, [
+      "b2",
+      "b3",
+    ]);
+    expect(applied.inserted).toHaveLength(2);
+    expect(applied.inserted.map((i) => i.url).sort()).toEqual([
+      "https://x/nutrition/",
+      "https://x/soins/",
+    ]);
   });
 });

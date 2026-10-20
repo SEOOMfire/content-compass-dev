@@ -5,11 +5,12 @@ import {
   STEP_CONTEXT_KEYS,
   type Block,
   type JobContext,
+  type SemanticLinkingResult,
   type StepKey,
 } from "./types";
 import { extractSource, fetchHtml } from "./extract.server";
 import { linkDocument } from "./links";
-import { semanticLinkDocument, type MatchPage } from "./semantic-links";
+import { applySemanticLinks, semanticLinkDocument, type MatchPage } from "./semantic-links";
 import { embedTexts } from "./embeddings.server";
 import { decidePredicate } from "./decisions.server";
 import { renderMarkdown } from "./render";
@@ -483,6 +484,56 @@ export async function executeStep(jobId: string, stepKey: string) {
     await syncJobStatus(jobId, failedContext);
     return { ok: false as const, error: message };
   }
+}
+
+/**
+ * Wendet die vom Nutzer gewählten semantischen Links an und rendert den Export neu.
+ * Aktualisiert Kontext (semanticLinking.inserted, exportMarkdown) und das Ergebnis von Schritt 6.
+ */
+export async function applySemanticLinksStep(
+  jobId: string,
+  selectedBlockIds: string[],
+): Promise<{ ok: boolean; inserted: number; error?: string }> {
+  const { data: job, error } = await supabaseAdmin
+    .from("jobs")
+    .select("*, markets(*)")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error || !job) throw new Error("Job nicht gefunden.");
+  const marketRow = (job as unknown as { markets: MarketRow }).markets;
+  const market = toMarketProfile(marketRow);
+  const context = ((job as { context?: JobContext }).context ?? {}) as JobContext;
+  if (!context.localized?.blocks?.length)
+    throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+  if (!context.semanticLinking)
+    throw new Error("Schritt 6 (Semantische Links) muss zuerst laufen.");
+
+  const { blocks, inserted } = applySemanticLinks(
+    context.localized,
+    context.linking,
+    context.semanticLinking,
+    selectedBlockIds,
+  );
+  const exportMarkdown = renderMarkdown(blocks, context.localized.meta, {
+    closing_note: market.closing_note,
+  });
+  const semanticLinking: SemanticLinkingResult = { ...context.semanticLinking, inserted };
+  const nextContext: JobContext = { ...context, semanticLinking, exportMarkdown };
+
+  await supabaseAdmin
+    .from("jobs")
+    .update({ context: nextContext as never, updated_at: new Date().toISOString() })
+    .eq("id", jobId);
+  await supabaseAdmin
+    .from("job_steps")
+    .update({
+      output: { ...semanticLinking, export_length: exportMarkdown.length } as never,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("job_id", jobId)
+    .eq("step_key", "semantic_links");
+  await syncJobStatus(jobId, nextContext);
+  return { ok: true, inserted: inserted.length };
 }
 
 /**

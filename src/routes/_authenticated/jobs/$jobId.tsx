@@ -1,11 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Play, RefreshCw, ChevronDown, FileDown, Copy } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import {
   runStepFn,
+  applySemanticLinksFn,
   exportJobReport,
   exportPromptVars,
   exportFullJobDocs,
@@ -219,12 +220,60 @@ function LinkingSummary({ linking }: { linking: LinkingResult }) {
   );
 }
 
-function SemanticLinkingSummary({ semanticLinking }: { semanticLinking: SemanticLinkingResult }) {
+function SemanticLinkingSummary({
+  jobId,
+  semanticLinking,
+  canManage,
+  onApplied,
+}: {
+  jobId: string;
+  semanticLinking: SemanticLinkingResult;
+  canManage: boolean;
+  onApplied: () => void;
+}) {
+  const eligible = semanticLinking.keywords.filter((k) => k.eligible && k.chosen);
+  const below = semanticLinking.keywords.filter((k) => !k.eligible);
+  const signature = eligible.map((k) => k.block_id).join(",");
+  const [selected, setSelected] = useState<string[]>(() => eligible.map((k) => k.block_id));
+  const [busy, setBusy] = useState(false);
+
+  // Auswahl zurücksetzen, wenn sich die (≥ 80 %)-Kandidatenmenge ändert (z. B. neuer Lauf).
+  useEffect(() => {
+    setSelected(eligible.map((k) => k.block_id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature]);
+
+  function toggle(id: string) {
+    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  }
+
+  async function apply() {
+    setBusy(true);
+    try {
+      const res = await applySemanticLinksFn({ data: { jobId, blockIds: selected } });
+      if (res.ok) toast.success(`${res.inserted} Link(s) übernommen`);
+      else toast.error(res.error ?? "Übernehmen fehlgeschlagen");
+      onApplied();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Fehler");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-3">
       <p className="font-medium">
-        {semanticLinking.inserted.length} Link(s) aus {semanticLinking.keywords.length} Keyword(s)
-        eingesetzt
+        {eligible.length} Keyword(s) ≥ 80 %
+        {below.length > 0 && (
+          <span className="text-muted-foreground"> · {below.length} unter 80 %</span>
+        )}
+        {semanticLinking.inserted.length > 0 && (
+          <span className="text-muted-foreground">
+            {" "}
+            · {semanticLinking.inserted.length} übernommen
+          </span>
+        )}
       </p>
       {semanticLinking.warnings.length > 0 && (
         <ul className="list-disc space-y-0.5 pl-5 text-destructive">
@@ -240,44 +289,46 @@ function SemanticLinkingSummary({ semanticLinking }: { semanticLinking: Semantic
           ))}
         </ul>
       )}
-      {semanticLinking.keywords.length > 0 && (
-        <div className="space-y-3">
-          {semanticLinking.keywords.map((k) => (
-            <div key={k.block_id}>
-              <p>
+
+      {eligible.length === 0 ? (
+        <p className="text-muted-foreground">Keine Keywords mit ≥ 80 % Trefferquote.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {eligible.map((k) => (
+            <label
+              key={k.block_id}
+              className="flex cursor-pointer items-start gap-2 rounded border border-border p-2"
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                disabled={!canManage}
+                checked={selected.includes(k.block_id)}
+                onChange={() => toggle(k.block_id)}
+              />
+              <span className="min-w-0 flex-1">
                 <span className="tabular-nums text-muted-foreground">{k.block_id}</span> ·{" "}
                 <strong>{k.keyword}</strong>
                 {k.intent && <span className="text-muted-foreground"> · {k.intent}</span>}
-              </p>
-              {k.chosen && (
-                <p className="break-all">
-                  <Badge variant="secondary">verlinkt</Badge> {k.chosen.url}{" "}
-                  <span className="tabular-nums text-muted-foreground">
-                    (P {(k.chosen.probability * 100).toFixed(0)} % · Sim{" "}
-                    {k.chosen.similarity.toFixed(2)})
-                  </span>
-                </p>
-              )}
-              {!k.chosen && k.note && <p className="text-muted-foreground">{k.note}</p>}
-              {k.candidates.length > 0 && (
-                <ul className="mt-1 space-y-0.5 text-muted-foreground">
-                  {k.candidates.slice(0, 5).map((c, i) => (
-                    <li key={i} className="break-all">
-                      <span className="tabular-nums">
-                        {c.probability == null ? "—" : `${(c.probability * 100).toFixed(0)} %`}
-                      </span>{" "}
-                      · Sim {c.similarity.toFixed(2)} · {c.url}
-                      {c.title ? ` (${c.title})` : ""}
-                    </li>
-                  ))}
-                  {k.candidates.length > 5 && (
-                    <li>… {k.candidates.length - 5} weitere Kandidaten</li>
-                  )}
-                </ul>
-              )}
-            </div>
+                <span className="block break-all text-muted-foreground">
+                  {k.chosen!.url} · P {(k.chosen!.probability * 100).toFixed(0)} % · Sim{" "}
+                  {k.chosen!.similarity.toFixed(2)}
+                </span>
+              </span>
+            </label>
           ))}
+          {canManage && (
+            <Button size="sm" onClick={apply} disabled={busy}>
+              {busy ? "Übernehme…" : `${selected.length} Link(s) übernehmen`}
+            </Button>
+          )}
         </div>
+      )}
+
+      {below.length > 0 && (
+        <p className="text-muted-foreground">
+          {below.length} Keyword(s) unter 80 % – siehe Rohdaten (JSON).
+        </p>
       )}
     </div>
   );
@@ -532,7 +583,10 @@ function JobDetail() {
 
                   {def.key === "semantic_links" && output && Array.isArray(output["keywords"]) && (
                     <SemanticLinkingSummary
+                      jobId={jobId}
                       semanticLinking={output as unknown as SemanticLinkingResult}
+                      canManage={canManage}
+                      onApplied={() => refresh()}
                     />
                   )}
 

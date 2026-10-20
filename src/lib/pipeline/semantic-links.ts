@@ -16,7 +16,6 @@ import {
   DEFAULT_CANDIDATES,
   DEFAULT_DECISIONS_CONCURRENCY,
   DEFAULT_MAX_KEYWORDS,
-  DEFAULT_MAX_LINKS,
   DEFAULT_THRESHOLD,
   PAYLOAD_MAX_CHARS,
 } from "./semantic-links.config";
@@ -59,16 +58,20 @@ export interface SemanticLinkArgs {
   maxKeywords?: number;
   candidates?: number;
   threshold?: number;
-  maxLinks?: number;
   decisionsConcurrency?: number;
   payloadMaxChars?: number;
 }
 
 export interface SemanticLinkOutcome {
   semanticLinking: SemanticLinkingResult;
-  /** Lokalisierte Blöcke inkl. eingesetzter Links (für den Export). */
+  /** Lokalisierte Blöcke (Schritt-5-Link angewendet, noch ohne semantische Links). */
   blocks: LocalizedBlock[];
   stats: CallStats;
+}
+
+export interface ApplySemanticLinksOutcome {
+  blocks: LocalizedBlock[];
+  inserted: { block_id: string; keyword: string; url: string }[];
 }
 
 function normalizeKeyword(s: string): string {
@@ -200,6 +203,7 @@ interface Entry {
   block: LocalizedBlock;
   candidates: Candidate[];
   chosen: { url: string; similarity: number; probability: number } | null;
+  eligible: boolean;
   note?: string;
 }
 
@@ -232,6 +236,7 @@ function publicKeyword(entry: Entry): SemanticKeyword {
       probability: c.probability,
     })),
     chosen: entry.chosen,
+    eligible: entry.eligible,
     ...(entry.note ? { note: entry.note } : {}),
   };
 }
@@ -245,7 +250,6 @@ export async function semanticLinkDocument(args: SemanticLinkArgs): Promise<Sema
   const maxKeywords = args.maxKeywords ?? DEFAULT_MAX_KEYWORDS;
   const candidateCount = args.candidates ?? DEFAULT_CANDIDATES;
   const threshold = args.threshold ?? DEFAULT_THRESHOLD;
-  const maxLinks = args.maxLinks ?? DEFAULT_MAX_LINKS;
   const concurrency = args.decisionsConcurrency ?? DEFAULT_DECISIONS_CONCURRENCY;
   const payloadMax = args.payloadMaxChars ?? PAYLOAD_MAX_CHARS;
 
@@ -300,6 +304,7 @@ export async function semanticLinkDocument(args: SemanticLinkArgs): Promise<Sema
         block,
         candidates: [],
         chosen: null,
+        eligible: false,
       });
       if (entries.length >= maxKeywords) break;
     }
@@ -371,49 +376,55 @@ export async function semanticLinkDocument(args: SemanticLinkArgs): Promise<Sema
     }
   });
 
-  // 5 · Gierige Auswahl: Keywords nach bestem Score sortiert, URL/Block je einmal.
-  const scored = entries
-    .map((entry) => {
-      const best = entry.candidates
-        .filter((c) => c.probability != null)
-        .sort((a, b) => b.probability! - a.probability! || b.similarity - a.similarity)[0];
-      return { entry, best };
-    })
-    .filter((x): x is { entry: Entry; best: Candidate } => Boolean(x.best))
-    .sort((a, b) => b.best.probability! - a.best.probability!);
-
-  const usedUrls = new Set<string>();
-  const usedBlocks = new Set<string>();
-  const patchedByBlock = new Map<string, LocalizedBlock>();
-  for (const { entry, best } of scored) {
-    if (result.inserted.length >= maxLinks) break;
-    if (usedUrls.has(best.url) || usedBlocks.has(entry.block_id)) continue;
-    if ((best.probability ?? 0) < threshold) continue;
-    const patched = insertLinkIntoBlock(entry.block, entry.keyword, best.url);
-    if (!patched) {
-      entry.note = `Keyword „${entry.keyword}“ konnte nicht in ${entry.block_id} eingefügt werden.`;
+  // 5 · Besten Kandidaten je Keyword bestimmen (Vorschlag – noch kein Einsetzen).
+  for (const entry of entries) {
+    const best = entry.candidates
+      .filter((c) => c.probability != null)
+      .sort((a, b) => b.probability! - a.probability! || b.similarity - a.similarity)[0];
+    if (!best) {
+      if (!entry.note) entry.note = "Kein bewerteter Kandidat.";
       continue;
     }
-    usedUrls.add(best.url);
-    usedBlocks.add(entry.block_id);
-    patchedByBlock.set(entry.block_id, patched);
     entry.chosen = { url: best.url, similarity: best.similarity, probability: best.probability! };
-    result.inserted.push({ block_id: entry.block_id, keyword: entry.keyword, url: best.url });
-  }
-
-  if (result.inserted.length < maxLinks) {
-    const rest = scored.filter(
-      ({ entry, best }) =>
-        !entry.chosen && (best.probability ?? 0) < threshold && best.probability != null,
-    );
-    if (rest.length) {
-      result.notes.push(
-        `${rest.length} Keyword(s) ohne Kandidat über der Schwelle (${threshold}).`,
-      );
+    entry.eligible = best.probability! >= threshold;
+    if (!entry.eligible && !entry.note) {
+      entry.note = `Bester Kandidat unter der Schwelle (${Math.round(best.probability! * 100)} % < ${Math.round(threshold * 100)} %).`;
     }
   }
 
-  result.keywords = entries.map(publicKeyword);
-  const finalBlocks = blocks.map((b) => patchedByBlock.get(b.id) ?? b);
-  return { semanticLinking: result, blocks: finalBlocks, stats };
+  result.keywords = entries
+    .map(publicKeyword)
+    .sort(
+      (a, b) =>
+        Number(b.chosen?.probability ?? -1) - Number(a.chosen?.probability ?? -1) ||
+        Number(b.chosen?.similarity ?? -1) - Number(a.chosen?.similarity ?? -1),
+    );
+  return { semanticLinking: result, blocks, stats };
+}
+
+/** Setzt die vom Nutzer gewählten Links per Code ein (URL einmal, nur eligible). */
+export function applySemanticLinks(
+  localized: LocalizedDoc,
+  linking: LinkingResult | undefined,
+  semanticLinking: SemanticLinkingResult,
+  selectedBlockIds: string[],
+): ApplySemanticLinksOutcome {
+  const blocks = applyLinkingPatch(localized, linking);
+  const selected = new Set(selectedBlockIds);
+  const inserted: { block_id: string; keyword: string; url: string }[] = [];
+  const usedUrls = new Set<string>();
+  const patchedByBlock = new Map<string, LocalizedBlock>();
+  for (const kw of semanticLinking.keywords) {
+    if (!kw.eligible || !kw.chosen) continue;
+    if (!selected.has(kw.block_id)) continue;
+    if (usedUrls.has(kw.chosen.url)) continue;
+    const base = blocks.find((b) => b.id === kw.block_id);
+    if (!base) continue;
+    const patched = insertLinkIntoBlock(base, kw.keyword, kw.chosen.url);
+    if (!patched) continue;
+    usedUrls.add(kw.chosen.url);
+    patchedByBlock.set(kw.block_id, patched);
+    inserted.push({ block_id: kw.block_id, keyword: kw.keyword, url: kw.chosen.url });
+  }
+  return { blocks: blocks.map((b) => patchedByBlock.get(b.id) ?? b), inserted };
 }
