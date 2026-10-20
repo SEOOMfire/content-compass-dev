@@ -5,8 +5,8 @@
  *   node scripts/content-index.mjs crawl [--market fr-CH] [--limit N] [--force]
  *   node scripts/content-index.mjs status
  *
- * Läuft lokal (Node), nicht unter dem Vercel-Zeitlimit. Verbindung NUR gegen die
- * Dev-DB (gleicher Guard wie scripts/dev-db.mjs). OPENAI_API_KEY aus .env.local.
+ * Läuft lokal (Node), nicht unter dem Vercel-Zeitlimit. Verbindung über
+ * SUPABASE_DB_URL (Prod, gleicher Guard wie scripts/dev-db.mjs). OPENAI_API_KEY aus .env.
  */
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -42,7 +42,6 @@ const envLocal = readEnvFile(".env.local");
 const env = { ...envFile, ...envLocal, ...process.env };
 
 const PROD_ID = envFile.SUPABASE_PROJECT_ID ?? "";
-const DEV_ID = env.SUPABASE_PROJECT_ID_dev ?? "";
 
 function fail(msg) {
   console.error(msg);
@@ -50,13 +49,10 @@ function fail(msg) {
 }
 
 function guardedUrl() {
-  const url = env.SUPABASE_DB_URL_dev ?? "";
-  if (!url) fail("SUPABASE_DB_URL_dev fehlt in .env.local.");
-  if (!DEV_ID) fail("SUPABASE_PROJECT_ID_dev fehlt (.env).");
-  if (!url.includes(DEV_ID)) fail("Abbruch: SUPABASE_DB_URL_dev gehört nicht zum Dev-Projekt.");
-  if (PROD_ID && url.includes(PROD_ID))
-    fail("Abbruch: SUPABASE_DB_URL_dev zeigt auf das PROD-Projekt.");
-  if (PROD_ID && PROD_ID === DEV_ID) fail("Abbruch: Dev- und Prod-Projekt-ID sind identisch.");
+  const url = env.SUPABASE_DB_URL ?? "";
+  if (!url) fail("SUPABASE_DB_URL fehlt in .env.");
+  if (!PROD_ID) fail("SUPABASE_PROJECT_ID fehlt (.env).");
+  if (!url.includes(PROD_ID)) fail("Abbruch: SUPABASE_DB_URL gehört nicht zum Projekt.");
   return url;
 }
 

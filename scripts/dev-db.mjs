@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * Dev-Datenbank (eigenes Supabase-Projekt) einrichten – ohne die Prod-DB anzufassen.
+ * Datenbank einrichten/verwalten (Produktion).
  *
- *   node scripts/dev-db.mjs build            → schreibt db-export/dev-setup.sql (für den SQL-Editor)
- *   node scripts/dev-db.mjs status           → zeigt, ob die Dev-DB eingerichtet ist
- *   node scripts/dev-db.mjs setup            → richtet die leere Dev-DB ein (Schema, Stammdaten, Prompts)
+ *   node scripts/dev-db.mjs build            → schreibt db-export/setup.sql (für den SQL-Editor)
+ *   node scripts/dev-db.mjs status           → zeigt, ob die DB eingerichtet ist
+ *   node scripts/dev-db.mjs setup            → richtet eine leere DB ein (Schema, Stammdaten, Prompts)
  *   node scripts/dev-db.mjs migrate <datei>  → führt eine einzelne Migration aus drizzle/migrations/ aus
  *   node scripts/dev-db.mjs admin <e-mail>   → macht einen bereits angemeldeten Nutzer zum Admin
  *
- * Verbindung: SUPABASE_DB_URL_dev (Connection String der Dev-DB, nur in .env.local).
- * Schutz: Das Skript bricht ab, wenn die URL nicht die Dev-Projekt-ID enthält
- * oder die Prod-Projekt-ID (SUPABASE_PROJECT_ID aus .env) enthält.
+ * Verbindung: SUPABASE_DB_URL (Connection String der Prod-DB, in .env).
+ * Schutz: Das Skript bricht ab, wenn die URL nicht die Projekt-ID
+ * (SUPABASE_PROJECT_ID aus .env) enthält.
  */
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -34,9 +34,7 @@ const envFile = readEnvFile(".env");
 const envLocal = readEnvFile(".env.local");
 const env = { ...envFile, ...envLocal, ...process.env };
 
-/** Prod = das Lovable-Projekt aus der eingecheckten .env. */
 const PROD_ID = envFile.SUPABASE_PROJECT_ID ?? "";
-const DEV_ID = env.SUPABASE_PROJECT_ID_dev ?? "";
 
 /** Schema + Stammdaten + Workspaces (0009) + vereinfachte Pipeline (0010–0012) als ein Skript. */
 function buildSetupSql() {
@@ -95,21 +93,16 @@ function buildSetupSql() {
 }
 
 function guardedUrl() {
-  const url = env.SUPABASE_DB_URL_dev ?? "";
+  const url = env.SUPABASE_DB_URL ?? "";
   if (!url) {
     fail(
-      "SUPABASE_DB_URL_dev fehlt in .env.local.\n" +
-        "Supabase-Dashboard (Dev-Projekt) > Connect > Connection string (URI, Session pooler) eintragen.",
+      "SUPABASE_DB_URL fehlt in .env.\n" +
+        "Supabase-Dashboard > Connect > Connection string (URI, Session pooler) eintragen.",
     );
   }
-  if (!DEV_ID) fail("SUPABASE_PROJECT_ID_dev fehlt (.env).");
-  if (!url.includes(DEV_ID))
-    fail(
-      "Abbruch: SUPABASE_DB_URL_dev gehört nicht zum Dev-Projekt (Projekt-ID fehlt in der URL).",
-    );
-  if (PROD_ID && url.includes(PROD_ID))
-    fail("Abbruch: SUPABASE_DB_URL_dev zeigt auf das PROD-Projekt.");
-  if (PROD_ID && PROD_ID === DEV_ID) fail("Abbruch: Dev- und Prod-Projekt-ID sind identisch.");
+  if (!PROD_ID) fail("SUPABASE_PROJECT_ID fehlt (.env).");
+  if (!url.includes(PROD_ID))
+    fail("Abbruch: SUPABASE_DB_URL gehört nicht zum Projekt (Projekt-ID fehlt in der URL).");
   return url;
 }
 
