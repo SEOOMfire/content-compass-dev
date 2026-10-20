@@ -220,7 +220,7 @@ export interface SemanticKeyword {
   keyword: string;
   intent: string;
   candidates: SemanticCandidate[];
-  chosen: { url: string; similarity: number; probability: number } | null;
+  chosen: { url: string; title: string | null; similarity: number; probability: number } | null;
   /** Bester Kandidat erreicht die Mindestwahrscheinlichkeit (≥ THRESHOLD). */
   eligible: boolean;
   note?: string;

@@ -13,6 +13,7 @@ import {
 } from "@/lib/pipeline.functions";
 import { downloadMarkdown } from "@/lib/download";
 import { renderBlock } from "@/lib/pipeline/render";
+import { blockPlainText } from "@/lib/pipeline/validate";
 import { useActiveWorkspace } from "@/lib/use-active-workspace";
 import {
   isLegacyContext,
@@ -20,6 +21,7 @@ import {
   type Finding,
   type JobContext,
   type LinkingResult,
+  type LocalizedBlock,
   type ReviewIssue,
   type SemanticLinkingResult,
 } from "@/lib/pipeline/types";
@@ -220,14 +222,29 @@ function LinkingSummary({ linking }: { linking: LinkingResult }) {
   );
 }
 
+function Highlight({ text, keyword }: { text: string; keyword: string }) {
+  const idx = text.toLowerCase().indexOf(keyword.toLowerCase());
+  if (idx < 0) return <>{text}</>;
+  const end = idx + keyword.length;
+  return (
+    <>
+      {text.slice(0, idx)}
+      <mark className="rounded bg-amber-200/70 px-0.5 text-inherit">{text.slice(idx, end)}</mark>
+      {text.slice(end)}
+    </>
+  );
+}
+
 function SemanticLinkingSummary({
   jobId,
   semanticLinking,
+  blocks,
   canManage,
   onApplied,
 }: {
   jobId: string;
   semanticLinking: SemanticLinkingResult;
+  blocks: LocalizedBlock[] | undefined;
   canManage: boolean;
   onApplied: () => void;
 }) {
@@ -236,6 +253,7 @@ function SemanticLinkingSummary({
   const signature = eligible.map((k) => k.block_id).join(",");
   const [selected, setSelected] = useState<string[]>(() => eligible.map((k) => k.block_id));
   const [busy, setBusy] = useState(false);
+  const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
 
   // Auswahl zurücksetzen, wenn sich die (≥ 80 %)-Kandidatenmenge ändert (z. B. neuer Lauf).
   useEffect(() => {
@@ -293,30 +311,76 @@ function SemanticLinkingSummary({
       {eligible.length === 0 ? (
         <p className="text-muted-foreground">Keine Keywords mit ≥ 80 % Trefferquote.</p>
       ) : (
-        <div className="space-y-1.5">
-          {eligible.map((k) => (
-            <label
-              key={k.block_id}
-              className="flex cursor-pointer items-start gap-2 rounded border border-border p-2"
-            >
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                disabled={!canManage}
-                checked={selected.includes(k.block_id)}
-                onChange={() => toggle(k.block_id)}
-              />
-              <span className="min-w-0 flex-1">
-                <span className="tabular-nums text-muted-foreground">{k.block_id}</span> ·{" "}
-                <strong>{k.keyword}</strong>
-                {k.intent && <span className="text-muted-foreground"> · {k.intent}</span>}
-                <span className="block break-all text-muted-foreground">
-                  {k.chosen!.url} · P {(k.chosen!.probability * 100).toFixed(0)} % · Sim{" "}
-                  {k.chosen!.similarity.toFixed(2)}
-                </span>
-              </span>
-            </label>
-          ))}
+        <div className="space-y-2">
+          {eligible.map((k) => {
+            const src = blockById.get(k.block_id);
+            const srcText = src ? blockPlainText(src) : "";
+            return (
+              <div key={k.block_id} className="rounded-md border border-border p-2">
+                <label className="flex cursor-pointer items-start gap-2">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5"
+                    disabled={!canManage}
+                    checked={selected.includes(k.block_id)}
+                    onChange={() => toggle(k.block_id)}
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                      <span className="tabular-nums text-muted-foreground">{k.block_id}</span>
+                      <strong>{k.keyword}</strong>
+                      {k.intent && <span className="text-muted-foreground">· {k.intent}</span>}
+                    </span>
+                    {srcText && (
+                      <span className="mt-1 block border-l-2 border-border pl-2 text-muted-foreground">
+                        „<Highlight text={srcText} keyword={k.keyword} />“
+                      </span>
+                    )}
+                    <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+                      <a
+                        href={k.chosen!.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        className="font-medium text-primary underline-offset-2 hover:underline"
+                      >
+                        {k.chosen!.title || k.chosen!.url} ↗
+                      </a>
+                      <span className="tabular-nums text-muted-foreground">
+                        P {(k.chosen!.probability * 100).toFixed(0)} % · Sim{" "}
+                        {k.chosen!.similarity.toFixed(2)}
+                      </span>
+                    </span>
+                  </span>
+                </label>
+                {k.candidates.length > 1 && (
+                  <details className="mt-1.5">
+                    <summary className="cursor-pointer text-muted-foreground">
+                      {k.candidates.length} Kandidaten
+                    </summary>
+                    <ul className="mt-1 space-y-0.5 pl-5">
+                      {k.candidates.map((c, i) => (
+                        <li key={i} className="break-all">
+                          <span className="tabular-nums text-muted-foreground">
+                            {c.probability == null ? "—" : `${(c.probability * 100).toFixed(0)} %`}
+                          </span>{" "}
+                          · Sim {c.similarity.toFixed(2)} ·{" "}
+                          <a
+                            href={c.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-primary underline-offset-2 hover:underline"
+                          >
+                            {c.title || c.url}
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            );
+          })}
           {canManage && (
             <Button size="sm" onClick={apply} disabled={busy}>
               {busy ? "Übernehme…" : `${selected.length} Link(s) übernehmen`}
@@ -326,9 +390,38 @@ function SemanticLinkingSummary({
       )}
 
       {below.length > 0 && (
-        <p className="text-muted-foreground">
-          {below.length} Keyword(s) unter 80 % – siehe Rohdaten (JSON).
-        </p>
+        <details>
+          <summary className="cursor-pointer text-muted-foreground">
+            {below.length} Keyword(s) unter 80 % anzeigen
+          </summary>
+          <ul className="mt-1 space-y-1.5 pl-4">
+            {below.map((k) => (
+              <li key={k.block_id}>
+                <span className="tabular-nums text-muted-foreground">{k.block_id}</span> ·{" "}
+                <strong>{k.keyword}</strong>
+                {k.chosen ? (
+                  <>
+                    {" "}
+                    ·{" "}
+                    <a
+                      href={k.chosen.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-primary underline-offset-2 hover:underline"
+                    >
+                      {k.chosen.title || k.chosen.url} ↗
+                    </a>{" "}
+                    <span className="tabular-nums text-muted-foreground">
+                      (P {(k.chosen.probability * 100).toFixed(0)} %)
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-muted-foreground"> · {k.note ?? "kein Kandidat"}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
     </div>
   );
@@ -585,6 +678,7 @@ function JobDetail() {
                     <SemanticLinkingSummary
                       jobId={jobId}
                       semanticLinking={output as unknown as SemanticLinkingResult}
+                      blocks={ctx.localized?.blocks}
                       canManage={canManage}
                       onApplied={() => refresh()}
                     />

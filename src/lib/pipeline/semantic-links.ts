@@ -202,7 +202,7 @@ interface Entry {
   intent: string;
   block: LocalizedBlock;
   candidates: Candidate[];
-  chosen: { url: string; similarity: number; probability: number } | null;
+  chosen: { url: string; title: string | null; similarity: number; probability: number } | null;
   eligible: boolean;
   note?: string;
 }
@@ -385,7 +385,12 @@ export async function semanticLinkDocument(args: SemanticLinkArgs): Promise<Sema
       if (!entry.note) entry.note = "Kein bewerteter Kandidat.";
       continue;
     }
-    entry.chosen = { url: best.url, similarity: best.similarity, probability: best.probability! };
+    entry.chosen = {
+      url: best.url,
+      title: best.title,
+      similarity: best.similarity,
+      probability: best.probability!,
+    };
     entry.eligible = best.probability! >= threshold;
     if (!entry.eligible && !entry.note) {
       entry.note = `Bester Kandidat unter der Schwelle (${Math.round(best.probability! * 100)} % < ${Math.round(threshold * 100)} %).`;

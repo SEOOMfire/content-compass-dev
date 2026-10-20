@@ -83,6 +83,8 @@ export interface StepRunResult {
   promptSnapshot?: string;
   tokensIn?: number;
   tokensOut?: number;
+  /** Zusätzliche Spalten, die am Job selbst gesetzt werden (z. B. Zähler). */
+  jobPatch?: Record<string, unknown>;
 }
 
 /** Schrittfehler mit auswertbarer Ausgabe (z. B. Liste fehlerhafter Block-IDs). */
@@ -339,6 +341,9 @@ export async function runStep(
       return {
         output: { ...res.semanticLinking, export_length: exportMarkdown.length },
         context: { semanticLinking: res.semanticLinking, exportMarkdown },
+        jobPatch: {
+          semantic_links_pending: res.semanticLinking.keywords.filter((k) => k.eligible).length,
+        },
         ...(res.stats.model ? { model: res.stats.model } : {}),
         ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
         tokensIn: res.stats.tokensIn,
@@ -439,6 +444,7 @@ export async function executeStep(jobId: string, stepKey: string) {
         context: nextContext as never,
         current_step: def.key,
         updated_at: new Date().toISOString(),
+        ...(result.jobPatch ?? {}),
       })
       .eq("id", jobId);
     await upsertStep(jobId, def.key, def.order, {
@@ -522,7 +528,11 @@ export async function applySemanticLinksStep(
 
   await supabaseAdmin
     .from("jobs")
-    .update({ context: nextContext as never, updated_at: new Date().toISOString() })
+    .update({
+      context: nextContext as never,
+      semantic_links_pending: 0,
+      updated_at: new Date().toISOString(),
+    })
     .eq("id", jobId);
   await supabaseAdmin
     .from("job_steps")

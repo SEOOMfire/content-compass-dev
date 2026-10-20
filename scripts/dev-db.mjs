@@ -56,6 +56,10 @@ function buildSetupSql() {
     join(ROOT, "drizzle/migrations/0014_prompt_dynamic_sections.sql"),
     "utf8",
   );
+  const m0015 = readFileSync(
+    join(ROOT, "drizzle/migrations/0015_jobs_semantic_links_pending.sql"),
+    "utf8",
+  );
   return [
     "-- ============================================================",
     "-- dev-setup.sql – erzeugt mit `node scripts/dev-db.mjs build`",
@@ -67,6 +71,7 @@ function buildSetupSql() {
     "--         + drizzle/migrations/0012_link_integration_prompt.sql",
     "--         + drizzle/migrations/0013_content_pages.sql",
     "--         + drizzle/migrations/0014_prompt_dynamic_sections.sql",
+    "--         + drizzle/migrations/0015_jobs_semantic_links_pending.sql",
     "-- ============================================================",
     "",
     setup,
@@ -88,6 +93,9 @@ function buildSetupSql() {
     "",
     "-- ============ 0014_prompt_dynamic_sections =================",
     m0014,
+    "",
+    "-- ============ 0015_jobs_semantic_links_pending =============",
+    m0015,
     "",
   ].join("\n");
 }

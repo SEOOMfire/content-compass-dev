@@ -86,7 +86,9 @@ function JobsPage() {
       if (!workspaceId) return [];
       const { data, error } = await supabase
         .from("jobs")
-        .select("id,source_url,status,current_step,created_at,workspace_id,markets(country,language)")
+        .select(
+          "id,source_url,status,current_step,created_at,workspace_id,semantic_links_pending,markets(country,language)",
+        )
         .eq("workspace_id", workspaceId)
         .order("created_at", { ascending: false })
         .limit(50);
@@ -229,7 +231,10 @@ function JobsPage() {
             <CardTitle className="text-base">Neuer Job</CardTitle>
           </CardHeader>
           <CardContent>
-            <form onSubmit={onCreate} className="grid gap-4 md:grid-cols-[1fr_240px_auto] md:items-end">
+            <form
+              onSubmit={onCreate}
+              className="grid gap-4 md:grid-cols-[1fr_240px_auto] md:items-end"
+            >
               <div className="space-y-1.5">
                 <Label htmlFor="url">Quell-URL (DE)</Label>
                 <Input
@@ -280,6 +285,7 @@ function JobsPage() {
               status: string;
               current_step: string | null;
               created_at: string;
+              semantic_links_pending: number;
               markets: { country: string; language: string } | null;
             }) => (
               <div key={j.id} className="rounded-md border border-border">
@@ -292,9 +298,12 @@ function JobsPage() {
                     <span className="flex items-center justify-between gap-4">
                       <span className="truncate text-sm">{j.source_url}</span>
                       <span className="flex shrink-0 items-center gap-2 text-xs text-muted-foreground">
-                        <span>
-                          {(j.markets as { country?: string } | null)?.country ?? "—"}
-                        </span>
+                        <span>{(j.markets as { country?: string } | null)?.country ?? "—"}</span>
+                        {j.semantic_links_pending > 0 && (
+                          <Badge className="border-transparent bg-amber-500 text-white">
+                            {j.semantic_links_pending} Link(s) prüfen
+                          </Badge>
+                        )}
                         <Badge
                           variant={
                             j.status === "error" || j.status === "done_with_errors"
