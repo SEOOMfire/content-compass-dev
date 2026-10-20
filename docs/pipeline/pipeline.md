@@ -206,9 +206,13 @@ alle Sitemaps + Pfadfilter). Harte Filter: URL unter Markt-Präfix + `magazine_r
 `sitemap_lastmod` (bzw. `--force`). Scraping mit UA `OMfireLocalizationBot/1.0`, Concurrency 3;
 Payload = H1 + Meta-Description + Blöcke (Überschriften als `## …`). `content_type`: `hub` bei
 Kategorie-Übersicht (Pfadtiefe ≤ `magazine_root`+1 oder < 250 Wörter), sonst `ratgeber`.
-Re-Embedding nur bei geändertem `content_hash` (sha256), Batch à 100; Upsert `on conflict (url)`;
+Re-Embedding nur bei geändertem `content_hash` (sha256), Batch à 40 (Input auf 24k Zeichen
+gekürzt); Upsert `on conflict (url)`;
 URLs, die nicht mehr in der Sitemap stehen, werden `is_active = false`. Abschluss-Report je Markt
 + Tabellengröße (`pg_total_relation_size`).
+
+Detaillierte Beschreibung von Speicherung und Analyse: siehe
+[`content-index.md`](./content-index.md).
 
 Tabelle `public.content_pages` (Migration `0013_content_pages.sql`): `url unique`, `market_id`,
 `country`/`language` (aus `markets.locale`), `content_type`, `title`/`h1`/`meta_description`,
