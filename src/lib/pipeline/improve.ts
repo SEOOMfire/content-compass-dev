@@ -41,6 +41,7 @@ export async function proposeImprovements(args: ImproveArgs): Promise<ImproveOut
     brand: args.market.brand,
     FINDINGS: JSON.stringify(args.ctx.findings ?? []),
     REMOVED_BLOCK_IDS: removedIds.length ? removedIds.join(", ") : "keine",
+    CHECK_BRIEFING: args.ctx.check?.markdown ?? "",
   });
   addStats(stats, res);
 

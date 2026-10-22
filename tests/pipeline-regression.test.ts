@@ -821,7 +821,7 @@ describe("pipeline", () => {
         exportMarkdown: "x",
       }),
     ).toBeNull();
-    // Schritt 8 hängt nur an Schritt 4 – Check (Schritt 7) ist keine Voraussetzung.
+    // Schritt 8 baut auf Schritt 7 auf – ohne Check blockiert er.
     expect(dependencyBlocker("improve", { source, findings: [], localized })).toContain("Schritt 4");
     expect(
       dependencyBlocker("improve", {
@@ -830,6 +830,16 @@ describe("pipeline", () => {
         localized,
         review: { issues: [], applied: [], warnings: [] },
         exportMarkdown: "x",
+      }),
+    ).toContain("Schritt 7");
+    expect(
+      dependencyBlocker("improve", {
+        source,
+        findings: [],
+        localized,
+        review: { issues: [], applied: [], warnings: [] },
+        exportMarkdown: "x",
+        check: { markdown: "…", blocking: 0, hints: 0, sourceFetched: true },
       }),
     ).toBeNull();
   });
