@@ -680,7 +680,9 @@ export async function applyImprovementsStep(
 
 /**
  * Job-Status aus den Schritten der aktuellen Pipeline (Altschritte werden ignoriert):
- * `done` ohne Fehler/Warnungen, `done_with_errors` bei offenen Warnungen.
+ * `done` bei vollständigem Lauf, `done_with_errors`/`error` nur bei einem echten
+ * Abbruch (Schritt `error` oder `blocked`). Weiche Warnungen (z. B. blockierende
+ * Check-Funde, Review-Hinweise) ändern den Status nicht – sie stehen im Schritt selbst.
  */
 async function syncJobStatus(jobId: string, ctx: JobContext) {
   const { data: steps } = await supabaseAdmin
@@ -693,14 +695,8 @@ async function syncJobStatus(jobId: string, ctx: JobContext) {
   const problems = rows.filter((s) => s.status === "error" || s.status === "blocked").length;
   const lastStep = PIPELINE[PIPELINE.length - 1]!.key;
   const finished = rows.find((s) => s.step_key === lastStep)?.status === "done";
-  const warnings =
-    (ctx.review?.warnings?.length ?? 0) +
-    (ctx.linking?.warnings?.length ?? 0) +
-    (ctx.semanticLinking?.warnings?.length ?? 0) +
-    (ctx.check?.blocking ?? 0) +
-    (ctx.improve?.warnings?.length ?? 0);
   const status = finished
-    ? problems || warnings
+    ? problems
       ? "done_with_errors"
       : "done"
     : problems
