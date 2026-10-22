@@ -264,6 +264,28 @@ function patchPreview(patch: ImprovementProposal["patch"]): string | null {
   return JSON.stringify(patch);
 }
 
+/** Fertiger, kurzer Such-Prompt zum Kopieren nach ChatGPT – Antwort passt direkt ins Quellen-Feld. */
+function sourceSearchPrompt(
+  p: ImprovementProposal,
+  country?: string,
+  language?: string,
+): string {
+  const market = country || language ? `${country ?? "der Zielmarkt"}${language ? ` (${language})` : ""}` : "den Zielmarkt";
+  const topic = [p.problem, p.suggestion].filter(Boolean).join(" ");
+  return [
+    `Du hilfst, für einen lokalisierten Artikel eine fehlende Quelle zu finden. Zielmarkt: ${market}.`,
+    "",
+    `Thema: ${topic}`,
+    "",
+    `Suche, ob es dafür eine konkrete Quelle/Lösung für ${country ?? "den Zielmarkt"} gibt.`,
+    "",
+    "Antworte NUR mit dem direkt verwertbaren Ergebnis (max. 1 Zeile):",
+    "„Name der Quelle – URL“ – oder „keine“, wenn nichts gefunden wurde.",
+    "",
+    "Keine Einleitung, keine Erklärungen, keine Alternativen.",
+  ].join("\n");
+}
+
 function SemanticLinkPanel({
   jobId,
   semanticLinking,
@@ -642,12 +664,16 @@ function ImprovementPanel({
   jobId,
   improve,
   blocks,
+  country,
+  language,
   canManage,
   onApplied,
 }: {
   jobId: string;
   improve: ImprovementResult;
   blocks: LocalizedBlock[] | undefined;
+  country: string | undefined;
+  language: string | undefined;
   canManage: boolean;
   onApplied: () => void;
 }) {
@@ -783,6 +809,28 @@ function ImprovementPanel({
                   )}
                 </span>
               </label>
+              {p.kind === "quelle" && !applied && (
+                <div className="mt-2 rounded border border-dashed border-border bg-muted/30 p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      Such-Prompt für ChatGPT
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        navigator.clipboard.writeText(sourceSearchPrompt(p, country, language));
+                        toast.success("Such-Prompt kopiert");
+                      }}
+                    >
+                      <Copy className="mr-1 h-3 w-3" /> Kopieren
+                    </Button>
+                  </div>
+                  <pre className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
+                    {sourceSearchPrompt(p, country, language)}
+                  </pre>
+                </div>
+              )}
               {p.patch == null && !applied && (
                 <input
                   type="text"
@@ -1174,6 +1222,8 @@ function JobDetail() {
           jobId={jobId}
           improve={ctx.improve}
           blocks={ctx.localized?.blocks}
+          country={market?.country}
+          language={market?.language}
           canManage={canManage}
           onApplied={() => refresh()}
         />
