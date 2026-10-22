@@ -19,7 +19,7 @@ import { useActiveWorkspace } from "@/lib/use-active-workspace";
 import {
   isLegacyContext,
   PIPELINE,
-  type CheckResult,
+  type Block,
   type Finding,
   type ImprovementProposal,
   type ImprovementResult,
@@ -27,6 +27,7 @@ import {
   type LinkingResult,
   type LocalizedBlock,
   type ReviewIssue,
+  type SemanticKeyword,
   type SemanticLinkingResult,
 } from "@/lib/pipeline/types";
 import { Button } from "@/components/ui/button";
@@ -290,6 +291,8 @@ function SemanticLinkPanel({
   jobId,
   semanticLinking,
   blocks,
+  sourceBlocks,
+  linking,
   pending,
   canManage,
   onApplied,
@@ -297,32 +300,38 @@ function SemanticLinkPanel({
   jobId: string;
   semanticLinking: SemanticLinkingResult;
   blocks: LocalizedBlock[] | undefined;
+  sourceBlocks: Block[] | undefined;
+  linking: LinkingResult | undefined;
   pending: number;
   canManage: boolean;
   onApplied: () => void;
 }) {
   const eligible = semanticLinking.keywords.filter((k) => k.eligible && k.chosen);
-  const below = semanticLinking.keywords.filter((k) => !k.eligible);
+  const below = semanticLinking.keywords.filter((k) => !k.eligible && k.chosen);
+  const noCandidate = semanticLinking.keywords.filter((k) => !k.chosen);
+  const selectable = [...eligible, ...below];
   const insertedIds = new Set(semanticLinking.inserted.map((i) => i.block_id));
   const signature = eligible.map((k) => k.block_id).join(",");
   const [selected, setSelected] = useState<string[]>(() => eligible.map((k) => k.block_id));
   const [busy, setBusy] = useState(false);
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
+  const sourceById = new Map((sourceBlocks ?? []).map((b) => [b.id, b]));
 
-  // Wie oft dieselbe Ziel-URL vorgeschlagen wird (über alle ≥ 80 %-Vorschläge).
+  // Wie oft dieselbe Ziel-URL vorgeschlagen wird (über alle auswählbaren Vorschläge).
   const urlCounts = new Map<string, number>();
-  for (const k of eligible) {
+  for (const k of selectable) {
     urlCounts.set(k.chosen!.url, (urlCounts.get(k.chosen!.url) ?? 0) + 1);
   }
   // Wie oft dieselbe Ziel-URL aktuell ausgewählt ist (Duplikat-Warnung).
   const selectedUrlCounts = new Map<string, number>();
   for (const id of selected) {
-    const k = eligible.find((x) => x.block_id === id);
-    if (k?.chosen) selectedUrlCounts.set(k.chosen.url, (selectedUrlCounts.get(k.chosen.url) ?? 0) + 1);
+    const k = selectable.find((x) => x.block_id === id);
+    if (k?.chosen)
+      selectedUrlCounts.set(k.chosen.url, (selectedUrlCounts.get(k.chosen.url) ?? 0) + 1);
   }
   const hasDuplicateSelection = [...selectedUrlCounts.values()].some((n) => n > 1);
 
-  // Auswahl zurücksetzen, wenn sich die (≥ 80 %)-Kandidatenmenge ändert (z. B. neuer Lauf).
+  // Auswahl zurücksetzen (nur die ≥ 80 %-Vorschläge), wenn sich deren Menge ändert.
   useEffect(() => {
     setSelected(eligible.map((k) => k.block_id));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -346,7 +355,108 @@ function SemanticLinkPanel({
     }
   }
 
-  const hasEligible = eligible.length > 0;
+  function row(k: SemanticKeyword) {
+    const src = blockById.get(k.block_id);
+    const srcText = src ? sentenceFor(blockPlainText(src), k.keyword) : "";
+    const de = sourceById.get(k.block_id);
+    const deText = de ? blockPlainText(de) : "";
+    const applied = insertedIds.has(k.block_id);
+    const url = k.chosen!.url;
+    const dupCount = urlCounts.get(url) ?? 0;
+    const dupSelected = selectedUrlCounts.get(url) ?? 0;
+    return (
+      <div
+        key={k.block_id}
+        className={`rounded-md border border-border p-2 ${applied ? "bg-muted/40 opacity-60" : ""}`}
+      >
+        <label className="flex cursor-pointer items-start gap-2">
+          <input
+            type="checkbox"
+            className="mt-0.5"
+            disabled={!canManage || applied}
+            checked={selected.includes(k.block_id)}
+            onChange={() => toggle(k.block_id)}
+          />
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+              <strong>{k.keyword}</strong>
+              <span className="text-muted-foreground">→</span>
+              <a
+                href={url}
+                target="_blank"
+                rel="noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="font-medium text-primary underline-offset-2 hover:underline"
+              >
+                {k.chosen!.title || url} ↗
+              </a>
+              <Badge variant="secondary" className="tabular-nums">
+                {(k.chosen!.probability * 100).toFixed(0)} %
+              </Badge>
+              {dupCount > 1 && (
+                <span className="tabular-nums text-muted-foreground">
+                  · {dupCount}× vorgeschlagen
+                </span>
+              )}
+              {dupSelected > 1 && (
+                <span className="rounded bg-amber-200/70 px-1 text-amber-900">
+                  {dupSelected}× ausgewählt – nur 1× wird übernommen
+                </span>
+              )}
+              {applied && (
+                <Badge variant="outline" className="text-muted-foreground">
+                  ✓ übernommen
+                </Badge>
+              )}
+            </span>
+            {srcText && (
+              <span className="mt-1 block border-l-2 border-border pl-2 text-muted-foreground">
+                „<Highlight text={srcText} keyword={k.keyword} />“
+              </span>
+            )}
+            {deText && (
+              <span className="mt-1 block pl-2 text-muted-foreground">
+                <span className="font-medium">DE:</span>{" "}
+                {deText.length > 280 ? `${deText.slice(0, 280)}…` : deText}
+              </span>
+            )}
+            <details className="mt-1">
+              <summary className="cursor-pointer text-muted-foreground">Details</summary>
+              <span className="mt-1 block text-muted-foreground">
+                Block: <span className="tabular-nums">{k.block_id}</span>
+                {k.intent && <> · Intent: {k.intent}</>} · Similarity{" "}
+                <span className="tabular-nums">{k.chosen!.similarity.toFixed(2)}</span>
+              </span>
+              {k.candidates.length > 1 && (
+                <ul className="mt-1 space-y-0.5 pl-4">
+                  {k.candidates.map((c, i) => (
+                    <li key={i} className="break-all">
+                      <span className="tabular-nums text-muted-foreground">
+                        {c.probability == null
+                          ? "—"
+                          : `${(c.probability * 100).toFixed(0)} %`}
+                      </span>{" "}
+                      · Sim {c.similarity.toFixed(2)} ·{" "}
+                      <a
+                        href={c.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-primary underline-offset-2 hover:underline"
+                      >
+                        {c.title || c.url}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </details>
+          </span>
+        </label>
+      </div>
+    );
+  }
+
+  const hasSelectable = selectable.length > 0;
 
   return (
     <Card
@@ -363,12 +473,12 @@ function SemanticLinkPanel({
             Semantische interne Links – Vorschläge werden nicht automatisch eingefügt.
           </p>
         </div>
-        {hasEligible && canManage && (
+        {hasSelectable && canManage && (
           <div className="flex shrink-0 gap-2">
             <Button
               size="sm"
               variant="outline"
-              onClick={() => setSelected(eligible.map((k) => k.block_id))}
+              onClick={() => setSelected(selectable.map((k) => k.block_id))}
             >
               Alle auswählen
             </Button>
@@ -387,138 +497,62 @@ function SemanticLinkPanel({
           </ul>
         )}
 
-        {!hasEligible ? (
+        {linking?.chosen && (
+          <div className="rounded-md border border-border bg-muted/40 p-2">
+            <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+              <strong>{linking.chosen.anchor_de}</strong>
+              <span className="text-muted-foreground">→</span>
+              <a
+                href={linking.chosen.target_href}
+                target="_blank"
+                rel="noreferrer"
+                className="font-medium text-primary underline-offset-2 hover:underline"
+              >
+                {linking.chosen.target_href} ↗
+              </a>
+              <Badge variant="outline" className="text-muted-foreground">
+                intern bereits verlinkt
+              </Badge>
+            </span>
+            <span className="mt-1 block text-muted-foreground">
+              Interne Verlinkung (Schritt 5) · Block{" "}
+              <span className="tabular-nums">{linking.chosen.block_id}</span>
+            </span>
+          </div>
+        )}
+
+        {!hasSelectable ? (
           <p className="text-sm text-muted-foreground">
             Keine passenden Linkvorschläge gefunden.
           </p>
         ) : (
-          <div className="space-y-2">
-            {eligible.map((k) => {
-              const src = blockById.get(k.block_id);
-              const srcText = src ? sentenceFor(blockPlainText(src), k.keyword) : "";
-              const applied = insertedIds.has(k.block_id);
-              const url = k.chosen!.url;
-              const dupCount = urlCounts.get(url) ?? 0;
-              const dupSelected = selectedUrlCounts.get(url) ?? 0;
-              return (
-                <div
-                  key={k.block_id}
-                  className={`rounded-md border border-border p-2 ${
-                    applied ? "bg-muted/40 opacity-60" : ""
-                  }`}
-                >
-                  <label className="flex cursor-pointer items-start gap-2">
-                    <input
-                      type="checkbox"
-                      className="mt-0.5"
-                      disabled={!canManage || applied}
-                      checked={selected.includes(k.block_id)}
-                      onChange={() => toggle(k.block_id)}
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                        <strong>{k.keyword}</strong>
-                        <span className="text-muted-foreground">→</span>
-                        <a
-                          href={k.chosen!.url}
-                          target="_blank"
-                          rel="noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="font-medium text-primary underline-offset-2 hover:underline"
-                        >
-                          {k.chosen!.title || k.chosen!.url} ↗
-                        </a>
-                        <Badge variant="secondary" className="tabular-nums">
-                          {(k.chosen!.probability * 100).toFixed(0)} %
-                        </Badge>
-                        {dupCount > 1 && (
-                          <span className="tabular-nums text-muted-foreground">
-                            · {dupCount}× vorgeschlagen
-                          </span>
-                        )}
-                        {dupSelected > 1 && (
-                          <span className="rounded bg-amber-200/70 px-1 text-amber-900">
-                            {dupSelected}× ausgewählt – nur 1× wird übernommen
-                          </span>
-                        )}
-                        {applied && (
-                          <Badge variant="outline" className="text-muted-foreground">
-                            ✓ übernommen
-                          </Badge>
-                        )}
-                      </span>
-                      {srcText && (
-                        <span className="mt-1 block border-l-2 border-border pl-2 text-muted-foreground">
-                          „<Highlight text={srcText} keyword={k.keyword} />“
-                        </span>
-                      )}
-                      <details className="mt-1">
-                        <summary className="cursor-pointer text-muted-foreground">Details</summary>
-                        <span className="mt-1 block text-muted-foreground">
-                          Block: <span className="tabular-nums">{k.block_id}</span>
-                          {k.intent && <> · Intent: {k.intent}</>} · Similarity{" "}
-                          <span className="tabular-nums">{k.chosen!.similarity.toFixed(2)}</span>
-                        </span>
-                        {k.candidates.length > 1 && (
-                          <ul className="mt-1 space-y-0.5 pl-4">
-                            {k.candidates.map((c, i) => (
-                              <li key={i} className="break-all">
-                                <span className="tabular-nums text-muted-foreground">
-                                  {c.probability == null
-                                    ? "—"
-                                    : `${(c.probability * 100).toFixed(0)} %`}
-                                </span>{" "}
-                                · Sim {c.similarity.toFixed(2)} ·{" "}
-                                <a
-                                  href={c.url}
-                                  target="_blank"
-                                  rel="noreferrer"
-                                  className="text-primary underline-offset-2 hover:underline"
-                                >
-                                  {c.title || c.url}
-                                </a>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </details>
-                    </span>
-                  </label>
-                </div>
-              );
-            })}
-          </div>
+          <>
+            {eligible.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Passende Vorschläge (≥ 80 %)</p>
+                {eligible.map(row)}
+              </div>
+            )}
+            {below.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-sm font-medium">Weitere Vorschläge (unter 80 %)</p>
+                {below.map(row)}
+              </div>
+            )}
+          </>
         )}
 
-        {below.length > 0 && (
+        {noCandidate.length > 0 && (
           <details>
             <summary className="cursor-pointer text-muted-foreground">
-              Weitere Vorschläge (unsicher) · {below.length}
+              Keine Kandidaten · {noCandidate.length}
             </summary>
-            <ul className="mt-1 space-y-1.5 pl-4">
-              {below.map((k) => (
+            <ul className="mt-1 space-y-0.5 pl-4">
+              {noCandidate.map((k) => (
                 <li key={k.block_id}>
                   <span className="tabular-nums text-muted-foreground">{k.block_id}</span> ·{" "}
                   <strong>{k.keyword}</strong>
-                  {k.chosen ? (
-                    <>
-                      {" "}
-                      ·{" "}
-                      <a
-                        href={k.chosen.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary underline-offset-2 hover:underline"
-                      >
-                        {k.chosen.title || k.chosen.url} ↗
-                      </a>{" "}
-                      <span className="tabular-nums text-muted-foreground">
-                        (P {(k.chosen.probability * 100).toFixed(0)} %)
-                      </span>
-                    </>
-                  ) : (
-                    <span className="text-muted-foreground"> · {k.note ?? "kein Kandidat"}</span>
-                  )}
+                  <span className="text-muted-foreground"> · {k.note ?? "kein Kandidat"}</span>
                 </li>
               ))}
             </ul>
@@ -533,7 +567,7 @@ function SemanticLinkPanel({
           </ul>
         )}
       </CardContent>
-      {hasEligible && canManage && (
+      {hasSelectable && canManage && (
         <CardFooter className="sticky bottom-0 z-10 justify-between gap-2 border-t border-border bg-surface/95 py-3 backdrop-blur">
           <span className="text-sm text-muted-foreground">
             {selected.length} ausgewählt
@@ -548,114 +582,6 @@ function SemanticLinkPanel({
           </Button>
         </CardFooter>
       )}
-    </Card>
-  );
-}
-
-function LocalizationCheckCard({
-  check,
-  status,
-  error,
-  canManage,
-  busy,
-  onRun,
-  slug,
-}: {
-  check: CheckResult | undefined;
-  status: string | undefined;
-  error: string | null | undefined;
-  canManage: boolean;
-  busy: boolean;
-  onRun: () => void;
-  slug: string;
-}) {
-  const running = status === "running";
-  const hasResult = Boolean(check && check.markdown);
-
-  if (!hasResult && !running) {
-    return (
-      <Card className="border-border bg-surface">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">Lokalisierungs-Check</CardTitle>
-          {canManage && (
-            <Button size="sm" variant="outline" onClick={onRun} disabled={busy}>
-              Ausführen
-            </Button>
-          )}
-        </CardHeader>
-        <CardContent className="pt-0">
-          <p className="text-sm text-muted-foreground">Noch nicht geprüft.</p>
-          {error && <p className="mt-1 text-sm text-destructive">{error}</p>}
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card className="border-border bg-surface">
-      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <CardTitle className="text-base">Lokalisierungs-Check</CardTitle>
-          {running ? (
-            <Badge variant="secondary">Prüfung läuft…</Badge>
-          ) : (
-            <>
-              {check && check.blocking > 0 && (
-                <Badge className="border-transparent bg-red-600 text-white">
-                  {check.blocking} blockierend
-                </Badge>
-              )}
-              {check && check.hints > 0 && (
-                <Badge className="border-transparent bg-amber-500 text-white">
-                  {check.hints} Hinweise
-                </Badge>
-              )}
-              {check && check.blocking === 0 && check.hints === 0 && (
-                <Badge variant="outline">Keine Funde</Badge>
-              )}
-            </>
-          )}
-        </div>
-        {!running && check && (
-          <div className="flex shrink-0 gap-2">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => {
-                navigator.clipboard.writeText(check.markdown);
-                toast.success("Briefing in die Zwischenablage kopiert");
-              }}
-            >
-              <Copy className="mr-2 h-4 w-4" /> Kopieren
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => downloadMarkdown(`${slug}-lokalisierungs-check.md`, check.markdown)}
-            >
-              <FileDown className="mr-2 h-4 w-4" /> .md herunterladen
-            </Button>
-            {canManage && (
-              <Button size="sm" variant="ghost" onClick={onRun} disabled={busy}>
-                Erneut
-              </Button>
-            )}
-          </div>
-        )}
-      </CardHeader>
-      <CardContent className="pt-0">
-        {running ? (
-          <div className="space-y-2">
-            <div className="h-3 w-2/3 animate-pulse rounded bg-muted" />
-            <div className="h-3 w-full animate-pulse rounded bg-muted" />
-            <div className="h-3 w-1/2 animate-pulse rounded bg-muted" />
-          </div>
-        ) : (
-          <pre className="max-h-[600px] overflow-auto whitespace-pre-wrap text-xs">
-            {check!.markdown}
-          </pre>
-        )}
-      </CardContent>
     </Card>
   );
 }
@@ -1004,7 +930,6 @@ function JobDetail() {
   const exportMd = typeof ctx.exportMarkdown === "string" ? ctx.exportMarkdown : undefined;
   const exportName = `${ctx.localized?.meta?.slug || `job-${jobId}`}.md`;
   const market = job.data?.markets as { country?: string; language?: string } | null | undefined;
-  const checkStep = (steps.data ?? []).find((s: Tables<"job_steps">) => s.step_key === "check");
 
   return (
     <div className="space-y-6">
@@ -1168,15 +1093,32 @@ function JobDetail() {
         })}
       </div>
 
-      <LocalizationCheckCard
-        check={ctx.check}
-        status={checkStep?.status}
-        error={checkStep?.error}
-        canManage={canManage}
-        busy={busy !== null}
-        onRun={() => runOne("check")}
-        slug={ctx.localized?.meta?.slug || `job-${jobId}`}
-      />
+      {ctx.semanticLinking && (
+        <div ref={panelRef}>
+          <SemanticLinkPanel
+            jobId={jobId}
+            semanticLinking={ctx.semanticLinking}
+            blocks={ctx.localized?.blocks}
+            sourceBlocks={ctx.source?.blocks}
+            linking={ctx.linking}
+            pending={job.data?.semantic_links_pending ?? 0}
+            canManage={canManage}
+            onApplied={() => refresh()}
+          />
+        </div>
+      )}
+
+      {ctx.improve && (
+        <ImprovementPanel
+          jobId={jobId}
+          improve={ctx.improve}
+          blocks={ctx.localized?.blocks}
+          country={market?.country}
+          language={market?.language}
+          canManage={canManage}
+          onApplied={() => refresh()}
+        />
+      )}
 
       {exportMd && (
         <Card className="border-border bg-surface">
@@ -1215,31 +1157,6 @@ function JobDetail() {
             </pre>
           </CardContent>
         </Card>
-      )}
-
-      {ctx.improve && (
-        <ImprovementPanel
-          jobId={jobId}
-          improve={ctx.improve}
-          blocks={ctx.localized?.blocks}
-          country={market?.country}
-          language={market?.language}
-          canManage={canManage}
-          onApplied={() => refresh()}
-        />
-      )}
-
-      {ctx.semanticLinking && (
-        <div ref={panelRef}>
-          <SemanticLinkPanel
-            jobId={jobId}
-            semanticLinking={ctx.semanticLinking}
-            blocks={ctx.localized?.blocks}
-            pending={job.data?.semantic_links_pending ?? 0}
-            canManage={canManage}
-            onApplied={() => refresh()}
-          />
-        </div>
       )}
     </div>
   );

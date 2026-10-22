@@ -407,7 +407,7 @@ export async function semanticLinkDocument(args: SemanticLinkArgs): Promise<Sema
   return { semanticLinking: result, blocks, stats };
 }
 
-/** Setzt die vom Nutzer gewählten Links per Code ein (URL einmal, nur eligible). */
+/** Setzt die vom Nutzer gewählten Links per Code ein (URL einmal, nur mit Kandidat). */
 export function applySemanticLinks(
   localized: LocalizedDoc,
   linking: LinkingResult | undefined,
@@ -420,7 +420,7 @@ export function applySemanticLinks(
   const usedUrls = new Set<string>();
   const patchedByBlock = new Map<string, LocalizedBlock>();
   for (const kw of semanticLinking.keywords) {
-    if (!kw.eligible || !kw.chosen) continue;
+    if (!kw.chosen) continue;
     if (!selected.has(kw.block_id)) continue;
     if (usedUrls.has(kw.chosen.url)) continue;
     const base = blocks.find((b) => b.id === kw.block_id);
