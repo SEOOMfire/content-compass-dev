@@ -4,13 +4,15 @@ import {
   STEP_BY_KEY,
   STEP_CONTEXT_KEYS,
   type Block,
+  type ImprovementResult,
   type JobContext,
+  type LocalizedBlock,
   type SemanticLinkingResult,
   type StepKey,
 } from "./types";
 import { extractSource, fetchHtml } from "./extract.server";
 import { linkDocument } from "./links";
-import { applySemanticLinks, semanticLinkDocument, type MatchPage } from "./semantic-links";
+import { applyLinkingPatch, applySemanticLinks, semanticLinkDocument, type MatchPage } from "./semantic-links";
 import { embedTexts } from "./embeddings.server";
 import { decidePredicate } from "./decisions.server";
 import { renderMarkdown } from "./render";
@@ -21,7 +23,7 @@ import {
   type PromptTemplateRow,
 } from "./ai.server";
 import { dependencyBlocker } from "./deps";
-import { marketPromptProfile, toMarketProfile, type MarketProfile } from "./market";
+import { isGermanTarget, marketPromptProfile, toMarketProfile, type MarketProfile } from "./market";
 import { normalizeFindings } from "./scan";
 import {
   blocksForPrompt,
@@ -32,6 +34,8 @@ import {
 } from "./localize";
 import { reviewDocument } from "./review";
 import { checkLocalization } from "./check";
+import { proposeImprovements } from "./improve";
+import { validateBlockPatch, type BlockContent } from "./validate";
 
 export { dependencyBlocker };
 
@@ -374,6 +378,28 @@ export async function runStep(
       };
     }
 
+    case "improve": {
+      requireSource(ctx);
+      if (!ctx.localized) throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+      if (typeof ctx.exportMarkdown !== "string")
+        throw new Error("Schritt 4 (Prüfen & Export) muss zuerst laufen.");
+      const tpl = await loadTemplate("improvement_proposals");
+      const res = await proposeImprovements({
+        sourceUrl: job.source_url,
+        market,
+        ctx,
+        call: promptCall(tpl),
+      });
+      return {
+        output: res.improve,
+        context: { improve: res.improve },
+        ...(res.stats.model ? { model: res.stats.model } : {}),
+        ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
+        tokensIn: res.stats.tokensIn,
+        tokensOut: res.stats.tokensOut,
+      };
+    }
+
     default:
       throw new Error(`Unbekannter Schritt: ${stepKey}`);
   }
@@ -570,6 +596,89 @@ export async function applySemanticLinksStep(
 }
 
 /**
+ * Wendet die vom Nutzer bestätigten Verbesserungsvorschläge an und rendert den
+ * Export neu. Reine Hinweise (ohne patch) werden nur als bestätigt markiert.
+ * Bereits übernommene Links (Schritt 5 + 6) bleiben erhalten.
+ */
+export async function applyImprovementsStep(
+  jobId: string,
+  selectedProposalIds: string[],
+): Promise<{ ok: boolean; applied: number; patched: number; error?: string }> {
+  const { data: job, error } = await supabaseAdmin
+    .from("jobs")
+    .select("*, markets(*)")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error || !job) throw new Error("Job nicht gefunden.");
+  const marketRow = (job as unknown as { markets: MarketRow }).markets;
+  const market = toMarketProfile(marketRow);
+  const context = ((job as { context?: JobContext }).context ?? {}) as JobContext;
+  if (!context.localized?.blocks?.length)
+    throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+  if (!context.improve)
+    throw new Error("Schritt 8 (Verbesserungen & Quellen) muss zuerst laufen.");
+
+  const selected = new Set(selectedProposalIds);
+  const sourceById = new Map((context.source?.blocks ?? []).map((b) => [b.id, b]));
+  const sameLanguage = isGermanTarget(market);
+  const blocks: LocalizedBlock[] = context.localized.blocks.map((b) => ({ ...b }));
+  const appliedIds: string[] = [];
+  const warnings: string[] = [];
+  let patched = 0;
+
+  for (const p of context.improve.proposals) {
+    if (!selected.has(p.id)) continue;
+    appliedIds.push(p.id);
+    if (!p.block_id || !p.patch) continue;
+    const idx = blocks.findIndex((b) => b.id === p.block_id);
+    const src = sourceById.get(p.block_id);
+    if (idx < 0 || !src || blocks[idx]!.removed) continue;
+    const v = validateBlockPatch(src, p.patch as BlockContent, {
+      removable: false,
+      sameLanguage,
+    });
+    if (v.ok) {
+      blocks[idx] = v.block;
+      patched += 1;
+    } else {
+      warnings.push(`${p.title}: ${v.errors.join("; ")}`);
+    }
+  }
+
+  const improvedLocalized = { meta: context.localized.meta, blocks };
+  const finalBlocks = context.semanticLinking
+    ? applySemanticLinks(
+        improvedLocalized,
+        context.linking,
+        context.semanticLinking,
+        context.semanticLinking.inserted.map((i) => i.block_id),
+      ).blocks
+    : applyLinkingPatch(improvedLocalized, context.linking);
+  const exportMarkdown = renderMarkdown(finalBlocks, improvedLocalized.meta, {
+    closing_note: market.closing_note,
+  });
+  const improve: ImprovementResult = { ...context.improve, applied: appliedIds, warnings };
+  const nextContext: JobContext = {
+    ...context,
+    localized: improvedLocalized,
+    improve,
+    exportMarkdown,
+  };
+
+  await supabaseAdmin
+    .from("jobs")
+    .update({ context: nextContext as never, updated_at: new Date().toISOString() })
+    .eq("id", jobId);
+  await supabaseAdmin
+    .from("job_steps")
+    .update({ output: improve as never, updated_at: new Date().toISOString() })
+    .eq("job_id", jobId)
+    .eq("step_key", "improve");
+  await syncJobStatus(jobId, nextContext);
+  return { ok: true, applied: appliedIds.length, patched };
+}
+
+/**
  * Job-Status aus den Schritten der aktuellen Pipeline (Altschritte werden ignoriert):
  * `done` ohne Fehler/Warnungen, `done_with_errors` bei offenen Warnungen.
  */
@@ -588,7 +697,8 @@ async function syncJobStatus(jobId: string, ctx: JobContext) {
     (ctx.review?.warnings?.length ?? 0) +
     (ctx.linking?.warnings?.length ?? 0) +
     (ctx.semanticLinking?.warnings?.length ?? 0) +
-    (ctx.check?.blocking ?? 0);
+    (ctx.check?.blocking ?? 0) +
+    (ctx.improve?.warnings?.length ?? 0);
   const status = finished
     ? problems || warnings
       ? "done_with_errors"
@@ -688,6 +798,14 @@ function describeStepInput(
       return {
         source_blocks: ctx.source?.blocks.length ?? 0,
         source_word_count: ctx.source?.wordCount ?? 0,
+        export_length: ctx.exportMarkdown?.length ?? 0,
+        market: marketInfo,
+      };
+    case "improve":
+      return {
+        source_blocks: ctx.source?.blocks.length ?? 0,
+        findings: ctx.findings?.length ?? 0,
+        removed_blocks: (ctx.localized?.blocks ?? []).filter((b) => b.removed).length,
         export_length: ctx.exportMarkdown?.length ?? 0,
         market: marketInfo,
       };

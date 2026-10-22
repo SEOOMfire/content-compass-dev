@@ -12,7 +12,8 @@ export type StepKey =
   | "review"
   | "links"
   | "semantic_links"
-  | "check";
+  | "check"
+  | "improve";
 
 export interface StepDef {
   key: StepKey;
@@ -78,6 +79,14 @@ export const PIPELINE: StepDef[] = [
     promptKey: "localization_check",
     description:
       "Prüft den Zieltext gegen das Original und erstellt ein Briefing (keine Änderungen).",
+  },
+  {
+    key: "improve",
+    order: 8,
+    label: "8 · Verbesserungen & Quellen",
+    promptKey: "improvement_proposals",
+    description:
+      "Schlägt inhaltliche Verbesserungen und fehlende Zielmarkt-Quellen vor – Anwendung erst nach Bestätigung.",
   },
 ];
 
@@ -261,6 +270,33 @@ export interface CheckResult {
   sourceFetched: boolean;
 }
 
+/** Art eines Verbesserungsvorschlags (Schritt 8). */
+export type ImprovementKind = "verbesserung" | "quelle";
+
+/** Ein Verbesserungsvorschlag – wird erst nach Bestätigung angewendet. */
+export interface ImprovementProposal {
+  id: string;
+  kind: ImprovementKind;
+  /** Zielblock (null = dokumentweit/Meta). */
+  block_id: string | null;
+  title: string;
+  problem: string;
+  suggestion: string;
+  /** Vollständig korrigierter Blockinhalt (text/items/rows) – oder null, wenn nur ein Hinweis. */
+  patch: Record<string, unknown> | null;
+  /** Vorgeschlagene Quelle (derzeit ohne externe API immer null; reserviert). */
+  source: { url: string; title: string | null } | null;
+}
+
+/** Ergebnis von Schritt 8 (Verbesserungen & Quellen). */
+export interface ImprovementResult {
+  proposals: ImprovementProposal[];
+  /** Vom Nutzer bestätigte Vorschlags-IDs. */
+  applied: string[];
+  notes: string[];
+  warnings: string[];
+}
+
 export interface JobContext {
   source?: SourceDoc;
   findings?: Finding[];
@@ -270,6 +306,7 @@ export interface JobContext {
   linking?: LinkingResult;
   semanticLinking?: SemanticLinkingResult;
   check?: CheckResult;
+  improve?: ImprovementResult;
 }
 
 /**
@@ -285,6 +322,7 @@ export const STEP_CONTEXT_KEYS: Record<StepKey, (keyof JobContext)[]> = {
   links: ["linking"],
   semantic_links: ["semanticLinking"],
   check: ["check"],
+  improve: ["improve"],
 };
 
 /**

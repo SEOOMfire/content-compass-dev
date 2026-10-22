@@ -35,6 +35,8 @@ export const PROMPT_VARIABLE_HINTS: Record<string, string> = {
   ZIELSPRACHE: "Zielsprache des Markts (ggf. mit Sprachvariante)",
   ZIELMARKT: "Zielland des Markts",
   AUSNAHMEN: "Technisch entfernte Quellbereiche, die nicht geprüft werden",
+  FINDINGS: "Funde aus Schritt 2 als JSON (Kontext für die Verbesserungsanalyse)",
+  REMOVED_BLOCK_IDS: "IDs bewusst gestrichener Blöcke (Produktvorschläge/Tools) – kein Befund",
 };
 
 /** Alle `{{platzhalter}}` in einem Prompt-Text (gleiche Syntax wie renderTemplate). */

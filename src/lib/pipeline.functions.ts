@@ -136,6 +136,19 @@ export const applySemanticLinksFn = createServerFn({ method: "POST" })
     return res;
   });
 
+export const applyImprovementsFn = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) =>
+    z.object({ jobId: z.string().uuid(), proposalIds: z.array(z.string()) }).parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    const workspaceId = await getJobWorkspace(data.jobId);
+    await assertWorkspaceRole(context.userId, workspaceId, MANAGER_ROLES);
+    const { applyImprovementsStep } = await import("@/lib/pipeline/engine.server");
+    const res = await applyImprovementsStep(data.jobId, data.proposalIds);
+    return res;
+  });
+
 export const exportJobReport = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) => z.object({ jobId: z.string().uuid() }).parse(d))

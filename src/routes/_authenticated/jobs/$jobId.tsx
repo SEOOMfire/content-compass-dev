@@ -7,6 +7,7 @@ import { supabase } from "@/integrations/supabase/client";
 import {
   runStepFn,
   applySemanticLinksFn,
+  applyImprovementsFn,
   exportJobReport,
   exportPromptVars,
   exportFullJobDocs,
@@ -20,6 +21,8 @@ import {
   PIPELINE,
   type CheckResult,
   type Finding,
+  type ImprovementProposal,
+  type ImprovementResult,
   type JobContext,
   type LinkingResult,
   type LocalizedBlock,
@@ -236,6 +239,31 @@ function Highlight({ text, keyword }: { text: string; keyword: string }) {
   );
 }
 
+/** Kleinster Textabschnitt (Satz bzw. Listenpunkt), der das Keyword enthält. */
+function sentenceFor(text: string, keyword: string): string {
+  const idx = text.toLowerCase().indexOf(keyword.toLowerCase());
+  if (idx < 0) return text.trim();
+  let start = idx;
+  while (start > 0 && !/[.!?\n]/.test(text.charAt(start - 1))) start--;
+  let end = idx + keyword.length;
+  while (end < text.length && !/[.!?\n]/.test(text.charAt(end))) end++;
+  if (end < text.length && /[.!?]/.test(text.charAt(end))) end++;
+  return text.slice(start, end).trim();
+}
+
+/** Flache Textvorschau eines Verbesserungs-Patches. */
+function patchPreview(patch: ImprovementProposal["patch"]): string | null {
+  if (!patch) return null;
+  if (typeof patch["text"] === "string") return patch["text"];
+  if (Array.isArray(patch["items"]))
+    return (patch["items"] as unknown[])
+      .map((it) => (typeof it === "string" ? it : JSON.stringify(it)))
+      .join("\n");
+  if (Array.isArray(patch["rows"]))
+    return (patch["rows"] as string[][]).map((r) => r.join(" | ")).join("\n");
+  return JSON.stringify(patch);
+}
+
 function SemanticLinkPanel({
   jobId,
   semanticLinking,
@@ -258,6 +286,19 @@ function SemanticLinkPanel({
   const [selected, setSelected] = useState<string[]>(() => eligible.map((k) => k.block_id));
   const [busy, setBusy] = useState(false);
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
+
+  // Wie oft dieselbe Ziel-URL vorgeschlagen wird (über alle ≥ 80 %-Vorschläge).
+  const urlCounts = new Map<string, number>();
+  for (const k of eligible) {
+    urlCounts.set(k.chosen!.url, (urlCounts.get(k.chosen!.url) ?? 0) + 1);
+  }
+  // Wie oft dieselbe Ziel-URL aktuell ausgewählt ist (Duplikat-Warnung).
+  const selectedUrlCounts = new Map<string, number>();
+  for (const id of selected) {
+    const k = eligible.find((x) => x.block_id === id);
+    if (k?.chosen) selectedUrlCounts.set(k.chosen.url, (selectedUrlCounts.get(k.chosen.url) ?? 0) + 1);
+  }
+  const hasDuplicateSelection = [...selectedUrlCounts.values()].some((n) => n > 1);
 
   // Auswahl zurücksetzen, wenn sich die (≥ 80 %)-Kandidatenmenge ändert (z. B. neuer Lauf).
   useEffect(() => {
@@ -332,8 +373,11 @@ function SemanticLinkPanel({
           <div className="space-y-2">
             {eligible.map((k) => {
               const src = blockById.get(k.block_id);
-              const srcText = src ? blockPlainText(src) : "";
+              const srcText = src ? sentenceFor(blockPlainText(src), k.keyword) : "";
               const applied = insertedIds.has(k.block_id);
+              const url = k.chosen!.url;
+              const dupCount = urlCounts.get(url) ?? 0;
+              const dupSelected = selectedUrlCounts.get(url) ?? 0;
               return (
                 <div
                   key={k.block_id}
@@ -365,6 +409,16 @@ function SemanticLinkPanel({
                         <Badge variant="secondary" className="tabular-nums">
                           {(k.chosen!.probability * 100).toFixed(0)} %
                         </Badge>
+                        {dupCount > 1 && (
+                          <span className="tabular-nums text-muted-foreground">
+                            · {dupCount}× vorgeschlagen
+                          </span>
+                        )}
+                        {dupSelected > 1 && (
+                          <span className="rounded bg-amber-200/70 px-1 text-amber-900">
+                            {dupSelected}× ausgewählt – nur 1× wird übernommen
+                          </span>
+                        )}
                         {applied && (
                           <Badge variant="outline" className="text-muted-foreground">
                             ✓ übernommen
@@ -459,8 +513,13 @@ function SemanticLinkPanel({
       </CardContent>
       {hasEligible && canManage && (
         <CardFooter className="sticky bottom-0 z-10 justify-between gap-2 border-t border-border bg-surface/95 py-3 backdrop-blur">
-          <span className="text-sm tabular-nums text-muted-foreground">
+          <span className="text-sm text-muted-foreground">
             {selected.length} ausgewählt
+            {hasDuplicateSelection && (
+              <span className="ml-2 text-amber-700">
+                · Achtung: mehrere Vorschläge zeigen auf dieselbe URL
+              </span>
+            )}
           </span>
           <Button size="sm" onClick={apply} disabled={busy || selected.length === 0}>
             {busy ? "Übernehme…" : `${selected.length} Link(s) übernehmen`}
@@ -575,6 +634,168 @@ function LocalizationCheckCard({
           </pre>
         )}
       </CardContent>
+    </Card>
+  );
+}
+
+function ImprovementPanel({
+  jobId,
+  improve,
+  blocks,
+  canManage,
+  onApplied,
+}: {
+  jobId: string;
+  improve: ImprovementResult;
+  blocks: LocalizedBlock[] | undefined;
+  canManage: boolean;
+  onApplied: () => void;
+}) {
+  const appliedIds = new Set(improve.applied);
+  const signature = improve.proposals.map((p) => p.id).join(",");
+  const [selected, setSelected] = useState<string[]>(() => improve.proposals.map((p) => p.id));
+  const [busy, setBusy] = useState(false);
+  const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
+
+  // Auswahl zurücksetzen, wenn sich die Vorschlagsmenge ändert (z. B. neuer Lauf).
+  useEffect(() => {
+    setSelected(improve.proposals.map((p) => p.id));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature]);
+
+  function toggle(id: string) {
+    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
+  }
+
+  async function apply() {
+    setBusy(true);
+    try {
+      const res = await applyImprovementsFn({ data: { jobId, proposalIds: selected } });
+      if (res.ok)
+        toast.success(
+          res.patched > 0
+            ? `${res.applied} Vorschläge übernommen (${res.patched} Textänderungen)`
+            : `${res.applied} Vorschläge übernommen`,
+        );
+      else toast.error(res.error ?? "Übernehmen fehlgeschlagen");
+      onApplied();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Fehler");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!improve.proposals.length) {
+    return (
+      <Card className="border-border bg-surface">
+        <CardHeader>
+          <CardTitle className="text-base">Verbesserungen & Quellen</CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0">
+          <p className="text-sm text-muted-foreground">Keine Vorschläge.</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <Card className="border-border bg-surface">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
+        <div>
+          <CardTitle className="text-base">Verbesserungen & Quellen</CardTitle>
+          <p className="text-xs text-muted-foreground">
+            KI-Vorschläge – werden erst nach Bestätigung angewendet.
+          </p>
+        </div>
+        {canManage && (
+          <div className="flex shrink-0 gap-2">
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setSelected(improve.proposals.map((p) => p.id))}
+            >
+              Alle auswählen
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setSelected([])}>
+              Keine
+            </Button>
+          </div>
+        )}
+      </CardHeader>
+      <CardContent className="space-y-2">
+        {improve.proposals.map((p) => {
+          const applied = appliedIds.has(p.id);
+          const current = p.block_id ? blockById.get(p.block_id) : undefined;
+          return (
+            <div
+              key={p.id}
+              className={`rounded-md border border-border p-2 ${
+                applied ? "bg-muted/40 opacity-60" : ""
+              }`}
+            >
+              <label className="flex cursor-pointer items-start gap-2">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  disabled={!canManage || applied}
+                  checked={selected.includes(p.id)}
+                  onChange={() => toggle(p.id)}
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                    <Badge variant={p.kind === "verbesserung" ? "default" : "secondary"}>
+                      {p.kind === "verbesserung" ? "Verbesserung" : "Quelle"}
+                    </Badge>
+                    <strong>{p.title}</strong>
+                    {p.block_id && (
+                      <span className="tabular-nums text-muted-foreground">· {p.block_id}</span>
+                    )}
+                    {applied && (
+                      <Badge variant="outline" className="text-muted-foreground">
+                        ✓ übernommen
+                      </Badge>
+                    )}
+                  </span>
+                  <span className="mt-1 block text-muted-foreground">{p.problem}</span>
+                  {p.suggestion && (
+                    <span className="mt-1 block text-muted-foreground">
+                      Empfehlung: {p.suggestion}
+                    </span>
+                  )}
+                  {(current || p.patch) && (
+                    <details className="mt-1">
+                      <summary className="cursor-pointer text-muted-foreground">Details</summary>
+                      {current && (
+                        <span className="mt-1 block border-l-2 border-border pl-2 text-muted-foreground">
+                          Aktuell: {blockPlainText(current)}
+                        </span>
+                      )}
+                      {p.patch && (
+                        <span className="mt-1 block border-l-2 border-emerald-400 pl-2 text-emerald-700">
+                          Vorschlag: {patchPreview(p.patch)}
+                        </span>
+                      )}
+                    </details>
+                  )}
+                </span>
+              </label>
+            </div>
+          );
+        })}
+      </CardContent>
+      {canManage && (
+        <CardFooter className="sticky bottom-0 z-10 justify-between gap-2 border-t border-border bg-surface/95 py-3 backdrop-blur">
+          <span className="text-sm tabular-nums text-muted-foreground">
+            {selected.length} ausgewählt
+          </span>
+          <Button size="sm" onClick={apply} disabled={busy || selected.length === 0}>
+            {busy
+              ? "Übernehme…"
+              : `${selected.length} ${selected.length === 1 ? "Vorschlag" : "Vorschläge"} übernehmen`}
+          </Button>
+        </CardFooter>
+      )}
     </Card>
   );
 }
@@ -845,6 +1066,14 @@ function JobDetail() {
                     </p>
                   )}
 
+                  {def.key === "improve" && (
+                    <p className="text-muted-foreground">
+                      {output && Array.isArray(output["proposals"])
+                        ? `${(output["proposals"] as unknown[]).length} Vorschlag/Vorschläge – siehe Panel unten.`
+                        : "Siehe Panel unten."}
+                    </p>
+                  )}
+
                   {step?.prompt_snapshot && (
                     <details>
                       <summary className="cursor-pointer text-muted-foreground">
@@ -860,7 +1089,8 @@ function JobDetail() {
                       def.key !== "scan" &&
                       def.key !== "review" &&
                       def.key !== "links" &&
-                      def.key !== "semantic_links"
+                      def.key !== "semantic_links" &&
+                      def.key !== "improve"
                     }
                   >
                     <summary className="cursor-pointer text-muted-foreground">
@@ -924,6 +1154,16 @@ function JobDetail() {
             </pre>
           </CardContent>
         </Card>
+      )}
+
+      {ctx.improve && (
+        <ImprovementPanel
+          jobId={jobId}
+          improve={ctx.improve}
+          blocks={ctx.localized?.blocks}
+          canManage={canManage}
+          onApplied={() => refresh()}
+        />
       )}
 
       {ctx.semanticLinking && (

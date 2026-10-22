@@ -248,6 +248,29 @@ export async function buildJobReport(
   out.push(json(ctx, 20000));
   out.push("");
 
+  out.push("## Verbesserungen & Quellen (Schritt 8)");
+  out.push("");
+  const improve = ctx.improve;
+  if (!improve) {
+    out.push("_Noch nicht ausgeführt._");
+  } else if (!improve.proposals.length) {
+    out.push("_Keine Vorschläge._");
+  } else {
+    for (const p of improve.proposals) {
+      const applied = improve.applied.includes(p.id) ? "✓ übernommen" : "offen";
+      out.push(
+        `### ${p.id} · ${p.kind === "verbesserung" ? "Verbesserung" : "Quelle"} (${applied})${p.block_id ? ` · ${p.block_id}` : ""}`,
+      );
+      out.push(`**${p.title}**`);
+      out.push(`- Problem: ${p.problem}`);
+      if (p.suggestion) out.push(`- Empfehlung: ${p.suggestion}`);
+      if (p.source?.url) out.push(`- Quelle: ${p.source.title ?? p.source.url} (${p.source.url})`);
+      if (p.patch) out.push(`- Patch: \`\`\`json\n${JSON.stringify(p.patch)}\n\`\`\``);
+      out.push("");
+    }
+  }
+  out.push("");
+
   out.push("## Export-Markdown");
   out.push("");
   out.push(
