@@ -84,7 +84,7 @@ export function applyLinkingPatch(
   linking?: LinkingResult,
 ): LocalizedBlock[] {
   const blocks = localized.blocks.map((b) => ({ ...b }));
-  if (linking?.patched_block) {
+  if (linking?.inserted && linking?.patched_block) {
     const idx = blocks.findIndex((b) => b.id === linking.patched_block!.id);
     if (idx >= 0) blocks[idx] = linking.patched_block;
   }

@@ -7,6 +7,7 @@ import { supabase } from "@/integrations/supabase/client";
 import {
   runStepFn,
   applySemanticLinksFn,
+  setLinkingInsertedFn,
   applyImprovementsFn,
   exportJobReport,
   exportPromptVars,
@@ -314,6 +315,7 @@ function SemanticLinkPanel({
   const signature = eligible.map((k) => k.block_id).join(",");
   const [selected, setSelected] = useState<string[]>(() => eligible.map((k) => k.block_id));
   const [busy, setBusy] = useState(false);
+  const [togglingLink, setTogglingLink] = useState(false);
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
   const sourceById = new Map((sourceBlocks ?? []).map((b) => [b.id, b]));
 
@@ -352,6 +354,23 @@ function SemanticLinkPanel({
       toast.error(err instanceof Error ? err.message : "Fehler");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function toggleStep5() {
+    if (!linking) return;
+    setTogglingLink(true);
+    try {
+      const res = await setLinkingInsertedFn({
+        data: { jobId, inserted: !linking.inserted },
+      });
+      if (res.ok) toast.success(linking.inserted ? "Link entfernt" : "Link übernommen");
+      else toast.error(res.error ?? "Fehler");
+      onApplied();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Fehler");
+    } finally {
+      setTogglingLink(false);
     }
   }
 
@@ -498,26 +517,41 @@ function SemanticLinkPanel({
         )}
 
         {linking?.chosen && (
-          <div className="rounded-md border border-border bg-muted/40 p-2">
-            <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-              <strong>{linking.chosen.anchor_de}</strong>
-              <span className="text-muted-foreground">→</span>
-              <a
-                href={linking.chosen.target_href}
-                target="_blank"
-                rel="noreferrer"
-                className="font-medium text-primary underline-offset-2 hover:underline"
-              >
-                {linking.chosen.target_href} ↗
-              </a>
-              <Badge variant="outline" className="text-muted-foreground">
-                intern bereits verlinkt
-              </Badge>
-            </span>
-            <span className="mt-1 block text-muted-foreground">
-              Interne Verlinkung (Schritt 5) · Block{" "}
-              <span className="tabular-nums">{linking.chosen.block_id}</span>
-            </span>
+          <div
+            className={`rounded-md border border-border p-2 ${
+              linking.inserted ? "" : "bg-muted/40 opacity-70"
+            }`}
+          >
+            <label className="flex cursor-pointer items-start gap-2">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                disabled={!canManage || togglingLink || !linking.patched_block}
+                checked={linking.inserted}
+                onChange={() => toggleStep5()}
+              />
+              <span className="min-w-0 flex-1">
+                <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+                  <strong>{linking.chosen.anchor_de}</strong>
+                  <span className="text-muted-foreground">→</span>
+                  <a
+                    href={linking.chosen.target_href}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="font-medium text-primary underline-offset-2 hover:underline"
+                  >
+                    {linking.chosen.target_href} ↗
+                  </a>
+                  <Badge variant="outline" className="text-muted-foreground">
+                    {linking.inserted ? "intern bereits verlinkt" : "abgewählt"}
+                  </Badge>
+                </span>
+                <span className="mt-1 block text-muted-foreground">
+                  Interne Verlinkung (Schritt 5) · Block{" "}
+                  <span className="tabular-nums">{linking.chosen.block_id}</span>
+                </span>
+              </span>
+            </label>
           </div>
         )}
 

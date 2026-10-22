@@ -6,6 +6,7 @@ import {
   type Block,
   type ImprovementResult,
   type JobContext,
+  type LinkingResult,
   type LocalizedBlock,
   type SemanticLinkingResult,
   type StepKey,
@@ -593,6 +594,61 @@ export async function applySemanticLinksStep(
     .eq("step_key", "semantic_links");
   await syncJobStatus(jobId, nextContext);
   return { ok: true, inserted: inserted.length };
+}
+
+/**
+ * Schaltet den Schritt-5-Link (interne Verlinkung) an oder ab und rendert den
+ * Export neu. `patched_block` bleibt erhalten – `inserted` steuert, ob er im
+ * Export erscheint. Semantische Links (Schritt 6) bleiben erhalten.
+ */
+export async function setLinkingInsertedStep(
+  jobId: string,
+  inserted: boolean,
+): Promise<{ ok: boolean; error?: string }> {
+  const { data: job, error } = await supabaseAdmin
+    .from("jobs")
+    .select("*, markets(*)")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error || !job) throw new Error("Job nicht gefunden.");
+  const marketRow = (job as unknown as { markets: MarketRow }).markets;
+  const market = toMarketProfile(marketRow);
+  const context = ((job as { context?: JobContext }).context ?? {}) as JobContext;
+  if (!context.localized?.blocks?.length)
+    throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+  if (!context.linking)
+    throw new Error("Schritt 5 (Interne Verlinkung) muss zuerst laufen.");
+  if (inserted && !context.linking.patched_block)
+    throw new Error("Kein eingefügter Link vorhanden – Schritt 5 erneut ausführen.");
+
+  const linking: LinkingResult = { ...context.linking, inserted };
+  const finalBlocks = context.semanticLinking
+    ? applySemanticLinks(
+        context.localized,
+        linking,
+        context.semanticLinking,
+        context.semanticLinking.inserted.map((i) => i.block_id),
+      ).blocks
+    : applyLinkingPatch(context.localized, linking);
+  const exportMarkdown = renderMarkdown(finalBlocks, context.localized.meta, {
+    closing_note: market.closing_note,
+  });
+  const nextContext: JobContext = { ...context, linking, exportMarkdown };
+
+  await supabaseAdmin
+    .from("jobs")
+    .update({ context: nextContext as never, updated_at: new Date().toISOString() })
+    .eq("id", jobId);
+  await supabaseAdmin
+    .from("job_steps")
+    .update({
+      output: { ...linking, export_length: exportMarkdown.length } as never,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("job_id", jobId)
+    .eq("step_key", "links");
+  await syncJobStatus(jobId, nextContext);
+  return { ok: true };
 }
 
 /**
