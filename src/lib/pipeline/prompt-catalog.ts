@@ -29,6 +29,12 @@ export const PROMPT_VARIABLE_HINTS: Record<string, string> = {
   source_block: "Zugehöriger deutscher Quellblock (JSON) mit dem ursprünglichen Link",
   anchor_de: "Ankertext des Links in der deutschen Quelle",
   target_url: "hreflang-URL für das Zielland (wird exakt so verlinkt)",
+  QUELL_URL: "URL der deutschen Quelle",
+  ORIGINAL: "Deutsches Original als Blockliste (eine JSON-Zeile pro Block)",
+  EXPORT: "Lokalisierter Export als Markdown (Zieltext)",
+  ZIELSPRACHE: "Zielsprache des Markts (ggf. mit Sprachvariante)",
+  ZIELMARKT: "Zielland des Markts",
+  AUSNAHMEN: "Technisch entfernte Quellbereiche, die nicht geprüft werden",
 };
 
 /** Alle `{{platzhalter}}` in einem Prompt-Text (gleiche Syntax wie renderTemplate). */

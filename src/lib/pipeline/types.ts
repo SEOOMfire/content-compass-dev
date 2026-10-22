@@ -5,7 +5,14 @@
  * das Modell liefert nur den Text je Block. Markdown rendert ausschließlich der Code.
  */
 
-export type StepKey = "extract" | "scan" | "localize" | "review" | "links" | "semantic_links";
+export type StepKey =
+  | "extract"
+  | "scan"
+  | "localize"
+  | "review"
+  | "links"
+  | "semantic_links"
+  | "check";
 
 export interface StepDef {
   key: StepKey;
@@ -62,7 +69,15 @@ export const PIPELINE: StepDef[] = [
     label: "6 · Semantische Links",
     promptKey: "semantic_link_keywords",
     description:
-      "Passende Zielseiten aus dem eigenen Index (pgvector) je Ankertext suchen, per KI bewerten und die besten Links automatisch einsetzen.",
+      "Passende Zielseiten aus dem eigenen Index (pgvector) je Ankertext suchen und per KI bewerten. Die Vorschläge werden unten manuell übernommen.",
+  },
+  {
+    key: "check",
+    order: 7,
+    label: "7 · Lokalisierungs-Check",
+    promptKey: "localization_check",
+    description:
+      "Prüft den Zieltext gegen das Original und erstellt ein Briefing (keine Änderungen).",
   },
 ];
 
@@ -235,6 +250,17 @@ export interface SemanticLinkingResult {
   warnings: string[];
 }
 
+/** Ergebnis von Schritt 7 (Lokalisierungs-Check): Markdown-Briefing + Zähler. */
+export interface CheckResult {
+  markdown: string;
+  /** Anzahl nummerierter Funde unter „### Blockierend“. */
+  blocking: number;
+  /** Anzahl nummerierter Funde unter „### Hinweise“. */
+  hints: number;
+  /** Original lag als Blockliste vor (kein erneuter Abruf nötig). */
+  sourceFetched: boolean;
+}
+
 export interface JobContext {
   source?: SourceDoc;
   findings?: Finding[];
@@ -243,6 +269,7 @@ export interface JobContext {
   exportMarkdown?: string;
   linking?: LinkingResult;
   semanticLinking?: SemanticLinkingResult;
+  check?: CheckResult;
 }
 
 /**
@@ -257,6 +284,7 @@ export const STEP_CONTEXT_KEYS: Record<StepKey, (keyof JobContext)[]> = {
   review: ["review", "exportMarkdown"],
   links: ["linking"],
   semantic_links: ["semanticLinking"],
+  check: ["check"],
 };
 
 /**

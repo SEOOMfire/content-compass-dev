@@ -31,6 +31,7 @@ import {
   type PromptCall,
 } from "./localize";
 import { reviewDocument } from "./review";
+import { checkLocalization } from "./check";
 
 export { dependencyBlocker };
 
@@ -351,6 +352,28 @@ export async function runStep(
       };
     }
 
+    case "check": {
+      requireSource(ctx);
+      if (!ctx.localized) throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+      if (typeof ctx.exportMarkdown !== "string")
+        throw new Error("Schritt 4 (Prüfen & Export) muss zuerst laufen.");
+      const tpl = await loadTemplate("localization_check");
+      const res = await checkLocalization({
+        sourceUrl: job.source_url,
+        market,
+        ctx,
+        call: promptCall(tpl),
+      });
+      return {
+        output: res.check,
+        context: { check: res.check },
+        ...(res.stats.model ? { model: res.stats.model } : {}),
+        ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
+        tokensIn: res.stats.tokensIn,
+        tokensOut: res.stats.tokensOut,
+      };
+    }
+
     default:
       throw new Error(`Unbekannter Schritt: ${stepKey}`);
   }
@@ -564,7 +587,8 @@ async function syncJobStatus(jobId: string, ctx: JobContext) {
   const warnings =
     (ctx.review?.warnings?.length ?? 0) +
     (ctx.linking?.warnings?.length ?? 0) +
-    (ctx.semanticLinking?.warnings?.length ?? 0);
+    (ctx.semanticLinking?.warnings?.length ?? 0) +
+    (ctx.check?.blocking ?? 0);
   const status = finished
     ? problems || warnings
       ? "done_with_errors"
@@ -659,6 +683,13 @@ function describeStepInput(
         locale: market.locale,
         linkable_blocks: (ctx.localized?.blocks ?? []).filter((b) => !b.removed).length,
         step5_link: ctx.linking?.chosen?.target_href ?? null,
+      };
+    case "check":
+      return {
+        source_blocks: ctx.source?.blocks.length ?? 0,
+        source_word_count: ctx.source?.wordCount ?? 0,
+        export_length: ctx.exportMarkdown?.length ?? 0,
+        market: marketInfo,
       };
     default:
       return {};

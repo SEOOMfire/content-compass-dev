@@ -746,7 +746,7 @@ describe("review", () => {
 // ---------------------------------------------------------------------------
 
 describe("pipeline", () => {
-  test("genau 6 Schritte in fester Reihenfolge", () => {
+  test("genau 7 Schritte in fester Reihenfolge", () => {
     expect(PIPELINE.map((s) => s.key)).toEqual([
       "extract",
       "scan",
@@ -754,6 +754,7 @@ describe("pipeline", () => {
       "review",
       "links",
       "semantic_links",
+      "check",
     ]);
     expect(PIPELINE.filter((s) => s.promptKey).map((s) => s.promptKey)).toEqual([
       "localization_scan",
@@ -761,6 +762,7 @@ describe("pipeline", () => {
       "localization_review",
       "link_integration",
       "semantic_link_keywords",
+      "localization_check",
     ]);
   });
 
@@ -799,6 +801,17 @@ describe("pipeline", () => {
     );
     expect(
       dependencyBlocker("semantic_links", {
+        source,
+        findings: [],
+        localized,
+        review: { issues: [], applied: [], warnings: [] },
+        exportMarkdown: "x",
+      }),
+    ).toBeNull();
+    // Schritt 7 hängt nur an Schritt 4 – ein fehlender Abschluss von 5/6 blockiert nicht.
+    expect(dependencyBlocker("check", { source, findings: [], localized })).toContain("Schritt 4");
+    expect(
+      dependencyBlocker("check", {
         source,
         findings: [],
         localized,

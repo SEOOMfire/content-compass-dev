@@ -230,6 +230,20 @@ export async function buildJobReport(
   }
   out.push("");
 
+  out.push("## Lokalisierungs-Check (Schritt 7)");
+  out.push("");
+  const check = ctx.check;
+  if (!check) {
+    out.push("_Noch nicht ausgeführt._");
+  } else {
+    out.push(
+      `- **Blockierend:** ${check.blocking} · **Hinweise:** ${check.hints} · **Quelle abgerufen:** ${check.sourceFetched ? "ja" : "nein"}`,
+    );
+    out.push("");
+    out.push(check.markdown.trim() ? check.markdown : "_Kein Briefing erzeugt._");
+  }
+  out.push("");
+
   out.push("## Job-Kontext (Endstand)");
   out.push(json(ctx, 20000));
   out.push("");
