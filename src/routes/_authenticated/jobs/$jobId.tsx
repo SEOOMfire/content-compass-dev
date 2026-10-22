@@ -654,6 +654,7 @@ function ImprovementPanel({
   const appliedIds = new Set(improve.applied);
   const signature = improve.proposals.map((p) => p.id).join(",");
   const [selected, setSelected] = useState<string[]>(() => improve.proposals.map((p) => p.id));
+  const [userTexts, setUserTexts] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
 
@@ -670,7 +671,9 @@ function ImprovementPanel({
   async function apply() {
     setBusy(true);
     try {
-      const res = await applyImprovementsFn({ data: { jobId, proposalIds: selected } });
+      const res = await applyImprovementsFn({
+        data: { jobId, proposalIds: selected, userTexts },
+      });
       if (res.ok)
         toast.success(
           res.patched > 0
@@ -780,6 +783,16 @@ function ImprovementPanel({
                   )}
                 </span>
               </label>
+              {p.patch == null && !applied && (
+                <input
+                  type="text"
+                  placeholder="Quelle eintragen (URL oder Text) – wird als „Quelle: …“ ans Blockende angehängt"
+                  className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-xs"
+                  value={userTexts[p.id] ?? ""}
+                  disabled={!canManage}
+                  onChange={(e) => setUserTexts((cur) => ({ ...cur, [p.id]: e.target.value }))}
+                />
+              )}
             </div>
           );
         })}

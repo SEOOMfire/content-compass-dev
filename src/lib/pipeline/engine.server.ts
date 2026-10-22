@@ -597,12 +597,14 @@ export async function applySemanticLinksStep(
 
 /**
  * Wendet die vom Nutzer bestätigten Verbesserungsvorschläge an und rendert den
- * Export neu. Reine Hinweise (ohne patch) werden nur als bestätigt markiert.
- * Bereits übernommene Links (Schritt 5 + 6) bleiben erhalten.
+ * Export neu. Reine Hinweise (ohne patch) werden nur als bestätigt markiert –
+ * außer der Nutzer hat eine eigene Quelle/eigenen Text mitgegeben, die/der dann
+ * an den Block angehängt wird. Bereits übernommene Links (Schritt 5 + 6) bleiben erhalten.
  */
 export async function applyImprovementsStep(
   jobId: string,
   selectedProposalIds: string[],
+  userTexts: Record<string, string> = {},
 ): Promise<{ ok: boolean; applied: number; patched: number; error?: string }> {
   const { data: job, error } = await supabaseAdmin
     .from("jobs")
@@ -629,19 +631,47 @@ export async function applyImprovementsStep(
   for (const p of context.improve.proposals) {
     if (!selected.has(p.id)) continue;
     appliedIds.push(p.id);
-    if (!p.block_id || !p.patch) continue;
-    const idx = blocks.findIndex((b) => b.id === p.block_id);
-    const src = sourceById.get(p.block_id);
-    if (idx < 0 || !src || blocks[idx]!.removed) continue;
-    const v = validateBlockPatch(src, p.patch as BlockContent, {
-      removable: false,
-      sameLanguage,
-    });
-    if (v.ok) {
-      blocks[idx] = v.block;
-      patched += 1;
-    } else {
-      warnings.push(`${p.title}: ${v.errors.join("; ")}`);
+
+    if (p.block_id && p.patch) {
+      const idx = blocks.findIndex((b) => b.id === p.block_id);
+      const src = sourceById.get(p.block_id);
+      if (idx < 0 || !src || blocks[idx]!.removed) continue;
+      const v = validateBlockPatch(src, p.patch as BlockContent, {
+        removable: false,
+        sameLanguage,
+      });
+      if (v.ok) {
+        blocks[idx] = v.block;
+        patched += 1;
+      } else {
+        warnings.push(`${p.title}: ${v.errors.join("; ")}`);
+      }
+      continue;
+    }
+
+    const userText = (userTexts[p.id] ?? "").trim();
+    if (p.block_id && userText) {
+      const idx = blocks.findIndex((b) => b.id === p.block_id);
+      const src = sourceById.get(p.block_id);
+      const target = idx < 0 ? undefined : blocks[idx];
+      if (!src || !target || target.removed) continue;
+      if (target.type === "paragraph" || target.type === "quote") {
+        const v = validateBlockPatch(
+          src,
+          { text: `${target.text} Quelle: ${userText}` },
+          { removable: false, sameLanguage },
+        );
+        if (v.ok) {
+          blocks[idx] = v.block;
+          patched += 1;
+        } else {
+          warnings.push(`${p.title}: ${v.errors.join("; ")}`);
+        }
+      } else {
+        warnings.push(
+          `${p.title}: Blocktyp „${target.type}“ unterstützt kein automatisches Anhängen einer Quelle.`,
+        );
+      }
     }
   }
 
