@@ -166,6 +166,8 @@ export interface SourceDoc {
   wordCount: number;
   /** Interne Links in Dokumentreihenfolge. Fehlt bei Jobs, die vor Schritt 5 extrahiert wurden. */
   links?: SourceLink[];
+  /** Externe Links (anderer Host) in Dokumentreihenfolge. Fehlt bei Jobs, die vor Schritt 8 extrahiert wurden. */
+  externalLinks?: SourceLink[];
 }
 
 export interface LocalizedMeta {

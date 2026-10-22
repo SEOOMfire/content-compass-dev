@@ -31,6 +31,7 @@ export async function proposeImprovements(args: ImproveArgs): Promise<ImproveOut
   const removedIds = (args.ctx.localized?.blocks ?? [])
     .filter((b) => b.removed)
     .map((b) => b.id);
+  const externalSources = args.ctx.source?.externalLinks ?? [];
 
   const res = await args.call({
     QUELL_URL: args.sourceUrl,
@@ -42,6 +43,7 @@ export async function proposeImprovements(args: ImproveArgs): Promise<ImproveOut
     FINDINGS: JSON.stringify(args.ctx.findings ?? []),
     REMOVED_BLOCK_IDS: removedIds.length ? removedIds.join(", ") : "keine",
     CHECK_BRIEFING: args.ctx.check?.markdown ?? "",
+    EXTERNAL_SOURCES: JSON.stringify(externalSources),
   });
   addStats(stats, res);
 

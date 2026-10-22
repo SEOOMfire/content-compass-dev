@@ -38,6 +38,7 @@ export const PROMPT_VARIABLE_HINTS: Record<string, string> = {
   FINDINGS: "Funde aus Schritt 2 als JSON (Kontext für die Verbesserungsanalyse)",
   REMOVED_BLOCK_IDS: "IDs bewusst gestrichener Blöcke (Produktvorschläge/Tools) – kein Befund",
   CHECK_BRIEFING: "Markdown-Briefing des Lokalisierungs-Checks (Schritt 7), auf dem Schritt 8 aufbaut",
+  EXTERNAL_SOURCES: "Externe Quellen im Original als JSON (Block-ID, Ankertext, URL) – nur dort sind Quelle-Hinweise erlaubt",
 };
 
 /** Alle `{{platzhalter}}` in einem Prompt-Text (gleiche Syntax wie renderTemplate). */

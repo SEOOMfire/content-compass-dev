@@ -1,8 +1,7 @@
 import { parse, NodeType, type HTMLElement, type Node } from "node-html-parser";
 import type { Block, HeadingLevel, ListItem, SourceDoc } from "./types";
 import { countBlockWords } from "./words";
-import { internalLinks } from "./links";
-
+import { externalLinks, internalLinks } from "./links";
 export { countBlockWords };
 
 export const USER_AGENT =
@@ -524,5 +523,6 @@ export async function extractSource(url: string): Promise<SourceDoc> {
     blocks,
     wordCount: countBlockWords(blocks),
     links: internalLinks(links, finalUrl),
+    externalLinks: externalLinks(links, finalUrl),
   };
 }

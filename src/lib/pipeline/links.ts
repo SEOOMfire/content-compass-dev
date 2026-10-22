@@ -107,6 +107,39 @@ export function internalLinks(
   return out;
 }
 
+/** Externe Links im Inhaltsbereich (anderer Host als die Quelle), ohne Duplikate. */
+export function externalLinks(
+  raw: { block_id: string; href: string; anchor: string }[],
+  baseUrl: string,
+): SourceLink[] {
+  let base: URL;
+  try {
+    base = new URL(baseUrl);
+  } catch {
+    return [];
+  }
+  const baseHost = normalizeHost(base.host);
+  const out: SourceLink[] = [];
+  const seen = new Set<string>();
+  for (const l of raw) {
+    let u: URL;
+    try {
+      u = new URL(l.href, base);
+    } catch {
+      continue;
+    }
+    if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+    if (normalizeHost(u.host) === baseHost) continue;
+    u.hash = "";
+    const href = u.toString();
+    const key = `${l.block_id}|${comparableUrl(href)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ block_id: l.block_id, href, anchor: l.anchor });
+  }
+  return out;
+}
+
 export interface HreflangAlternate {
   hreflang: string;
   href: string;
