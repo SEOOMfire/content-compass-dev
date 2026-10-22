@@ -801,6 +801,23 @@ function ImprovementPanel({
                   onChange={(e) => setUserTexts((cur) => ({ ...cur, [p.id]: e.target.value }))}
                 />
               )}
+              {p.kind === "verbesserung" &&
+                p.patch != null &&
+                typeof p.patch["text"] === "string" &&
+                !applied && (
+                  <div className="mt-2">
+                    <span className="text-xs font-medium text-muted-foreground">
+                      Vorschlag (bearbeitbar) – direkt übernehmen oder anpassen:
+                    </span>
+                    <textarea
+                      className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-xs"
+                      rows={4}
+                      value={userTexts[p.id] ?? (p.patch["text"] as string)}
+                      disabled={!canManage}
+                      onChange={(e) => setUserTexts((cur) => ({ ...cur, [p.id]: e.target.value }))}
+                    />
+                  </div>
+                )}
             </div>
           );
         })}

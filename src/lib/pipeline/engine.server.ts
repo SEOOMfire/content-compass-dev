@@ -688,14 +688,19 @@ export async function applyImprovementsStep(
     if (!selected.has(p.id)) continue;
     appliedIds.push(p.id);
 
+    const userText = (userTexts[p.id] ?? "").trim();
+
     if (p.block_id && p.patch) {
       const idx = blocks.findIndex((b) => b.id === p.block_id);
       const src = sourceById.get(p.block_id);
       if (idx < 0 || !src || blocks[idx]!.removed) continue;
-      const v = validateBlockPatch(src, p.patch as BlockContent, {
-        removable: false,
-        sameLanguage,
-      });
+      const type = blocks[idx]!.type;
+      let patch = p.patch as BlockContent;
+      // Nutzer hat den Vorschlag bearbeitet (nur bei Text-Blöcken möglich).
+      if (userText && (type === "paragraph" || type === "quote" || type === "heading")) {
+        patch = { text: userText };
+      }
+      const v = validateBlockPatch(src, patch, { removable: false, sameLanguage });
       if (v.ok) {
         blocks[idx] = v.block;
         patched += 1;
@@ -705,7 +710,6 @@ export async function applyImprovementsStep(
       continue;
     }
 
-    const userText = (userTexts[p.id] ?? "").trim();
     if (p.block_id && userText) {
       const idx = blocks.findIndex((b) => b.id === p.block_id);
       const src = sourceById.get(p.block_id);
