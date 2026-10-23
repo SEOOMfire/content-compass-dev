@@ -295,6 +295,12 @@ export interface ImprovementResult {
   proposals: ImprovementProposal[];
   /** Vom Nutzer bestätigte Vorschlags-IDs. */
   applied: string[];
+  /**
+   * Vom Nutzer eingegebener/geänderter Text je Vorschlags-ID:
+   * - "verbesserung" → bearbeiteter korrigierter Volltext
+   * - "quelle" → einzufügende Quelle (URL/Text)
+   */
+  overrides: Record<string, string>;
   notes: string[];
   warnings: string[];
 }

@@ -149,6 +149,32 @@ export const setLinkingInsertedFn = createServerFn({ method: "POST" })
     return res;
   });
 
+export const applyAllChangesFn = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((d: unknown) =>
+    z
+      .object({
+        jobId: z.string().uuid(),
+        linkingInserted: z.boolean(),
+        semanticBlockIds: z.array(z.string()),
+        improvementProposalIds: z.array(z.string()),
+        userTexts: z.record(z.string()),
+      })
+      .parse(d),
+  )
+  .handler(async ({ data, context }) => {
+    const workspaceId = await getJobWorkspace(data.jobId);
+    await assertWorkspaceRole(context.userId, workspaceId, MANAGER_ROLES);
+    const { applyAllChangesStep } = await import("@/lib/pipeline/engine.server");
+    const res = await applyAllChangesStep(data.jobId, {
+      linkingInserted: data.linkingInserted,
+      semanticBlockIds: data.semanticBlockIds,
+      improvementProposalIds: data.improvementProposalIds,
+      userTexts: data.userTexts,
+    });
+    return res;
+  });
+
 export const applyImprovementsFn = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((d: unknown) =>

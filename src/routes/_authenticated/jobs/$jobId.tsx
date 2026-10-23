@@ -6,9 +6,7 @@ import { Play, RefreshCw, ChevronDown, FileDown, Copy } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import {
   runStepFn,
-  applySemanticLinksFn,
-  setLinkingInsertedFn,
-  applyImprovementsFn,
+  applyAllChangesFn,
   exportJobReport,
   exportPromptVars,
   exportFullJobDocs,
@@ -33,7 +31,7 @@ import {
 } from "@/lib/pipeline/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { Tables } from "@/integrations/supabase/types";
 
 export const Route = createFileRoute("/_authenticated/jobs/$jobId")({
@@ -288,34 +286,95 @@ function sourceSearchPrompt(
   ].join("\n");
 }
 
+/** Fertiger Prompt, um für den ganzen Artikel anerkannte E-E-A-T-Quellen im Zielland zu finden. */
+function eeatSourcesPrompt(country?: string, language?: string, title?: string): string {
+  const market = country || language
+    ? `${country ?? "den Zielmarkt"}${language ? ` (${language})` : ""}`
+    : "den Zielmarkt";
+  return [
+    `Du hilfst, für einen lokalisierten Artikel passende, anerkannte Quellen zu finden. Zielmarkt: ${market}.`,
+    "",
+    `Thema des Artikels: ${title ?? "siehe unten"}`,
+    "",
+    `Finde seriöse, anerkannte und vertrauenswürdige Quellen aus ${country ?? "dem Zielmarkt"} (Behörden, Fachverbände, wissenschaftliche Institutionen, renommierte Fachportale), die für E-E-A-T (Experience, Expertise, Authoritativeness, Trustworthiness) als Beleg/Referenz geeignet sind.`,
+    "",
+    "Gib NUR eine kurze Liste zurück, direkt zum Einfügen – je Quelle eine Zeile:",
+    "„Name der Quelle – URL“",
+    "",
+    "Keine Einleitung, keine Erklärungen, keine Alternativen.",
+  ].join("\n");
+}
+
+function SourceFinderCard({
+  country,
+  language,
+  title,
+}: {
+  country: string | undefined;
+  language: string | undefined;
+  title: string | undefined;
+}) {
+  return (
+    <Card className="border-border bg-surface">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
+        <div>
+          <CardTitle className="text-base">Passende Quellen finden</CardTitle>
+          <p className="text-xs text-muted-foreground">
+            Erzeugt einen Prompt, der im Zielland anerkannte Quellen für E-E-A-T findet.
+          </p>
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => {
+            navigator.clipboard.writeText(eeatSourcesPrompt(country, language, title));
+            toast.success("Such-Prompt kopiert");
+          }}
+        >
+          <Copy className="mr-1 h-3 w-3" /> Prompt kopieren
+        </Button>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <pre className="whitespace-pre-wrap text-xs text-muted-foreground">
+          {eeatSourcesPrompt(country, language, title)}
+        </pre>
+      </CardContent>
+    </Card>
+  );
+}
+
 function SemanticLinkPanel({
-  jobId,
   semanticLinking,
   blocks,
   sourceBlocks,
   linking,
   pending,
   canManage,
-  onApplied,
+  selected,
+  linkingInserted,
+  onToggle,
+  onSelectAll,
+  onSelectNone,
+  onToggleStep5,
 }: {
-  jobId: string;
   semanticLinking: SemanticLinkingResult;
   blocks: LocalizedBlock[] | undefined;
   sourceBlocks: Block[] | undefined;
   linking: LinkingResult | undefined;
   pending: number;
   canManage: boolean;
-  onApplied: () => void;
+  selected: string[];
+  linkingInserted: boolean;
+  onToggle: (id: string) => void;
+  onSelectAll: () => void;
+  onSelectNone: () => void;
+  onToggleStep5: () => void;
 }) {
   const eligible = semanticLinking.keywords.filter((k) => k.eligible && k.chosen);
   const below = semanticLinking.keywords.filter((k) => !k.eligible && k.chosen);
   const noCandidate = semanticLinking.keywords.filter((k) => !k.chosen);
   const selectable = [...eligible, ...below];
   const insertedIds = new Set(semanticLinking.inserted.map((i) => i.block_id));
-  const signature = eligible.map((k) => k.block_id).join(",");
-  const [selected, setSelected] = useState<string[]>(() => eligible.map((k) => k.block_id));
-  const [busy, setBusy] = useState(false);
-  const [togglingLink, setTogglingLink] = useState(false);
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
   const sourceById = new Map((sourceBlocks ?? []).map((b) => [b.id, b]));
 
@@ -333,68 +392,24 @@ function SemanticLinkPanel({
   }
   const hasDuplicateSelection = [...selectedUrlCounts.values()].some((n) => n > 1);
 
-  // Auswahl zurücksetzen (nur die ≥ 80 %-Vorschläge), wenn sich deren Menge ändert.
-  useEffect(() => {
-    setSelected(eligible.map((k) => k.block_id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature]);
-
-  function toggle(id: string) {
-    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
-  }
-
-  async function apply() {
-    setBusy(true);
-    try {
-      const res = await applySemanticLinksFn({ data: { jobId, blockIds: selected } });
-      if (res.ok) toast.success(`${res.inserted} Link(s) übernommen`);
-      else toast.error(res.error ?? "Übernehmen fehlgeschlagen");
-      onApplied();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Fehler");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function toggleStep5() {
-    if (!linking) return;
-    setTogglingLink(true);
-    try {
-      const res = await setLinkingInsertedFn({
-        data: { jobId, inserted: !linking.inserted },
-      });
-      if (res.ok) toast.success(linking.inserted ? "Link entfernt" : "Link übernommen");
-      else toast.error(res.error ?? "Fehler");
-      onApplied();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Fehler");
-    } finally {
-      setTogglingLink(false);
-    }
-  }
-
   function row(k: SemanticKeyword) {
     const src = blockById.get(k.block_id);
     const srcText = src ? sentenceFor(blockPlainText(src), k.keyword) : "";
     const de = sourceById.get(k.block_id);
     const deText = de ? blockPlainText(de) : "";
-    const applied = insertedIds.has(k.block_id);
+    const inText = insertedIds.has(k.block_id);
     const url = k.chosen!.url;
     const dupCount = urlCounts.get(url) ?? 0;
     const dupSelected = selectedUrlCounts.get(url) ?? 0;
     return (
-      <div
-        key={k.block_id}
-        className={`rounded-md border border-border p-2 ${applied ? "bg-muted/40 opacity-60" : ""}`}
-      >
+      <div key={k.block_id} className="rounded-md border border-border p-2">
         <label className="flex cursor-pointer items-start gap-2">
           <input
             type="checkbox"
             className="mt-0.5"
-            disabled={!canManage || applied}
+            disabled={!canManage}
             checked={selected.includes(k.block_id)}
-            onChange={() => toggle(k.block_id)}
+            onChange={() => onToggle(k.block_id)}
           />
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
@@ -422,9 +437,9 @@ function SemanticLinkPanel({
                   {dupSelected}× ausgewählt – nur 1× wird übernommen
                 </span>
               )}
-              {applied && (
+              {inText && (
                 <Badge variant="outline" className="text-muted-foreground">
-                  ✓ übernommen
+                  ✓ im Text
                 </Badge>
               )}
             </span>
@@ -489,19 +504,15 @@ function SemanticLinkPanel({
             {pending > 0 ? `${pending} Linkvorschläge prüfen` : "Linkauswahl"}
           </CardTitle>
           <p className="text-xs text-muted-foreground">
-            Semantische interne Links – Vorschläge werden nicht automatisch eingefügt.
+            Links an-/abwählbar – werden mit „Alle Änderungen übernehmen“ angewendet.
           </p>
         </div>
         {hasSelectable && canManage && (
           <div className="flex shrink-0 gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => setSelected(selectable.map((k) => k.block_id))}
-            >
+            <Button size="sm" variant="outline" onClick={onSelectAll}>
               Alle auswählen
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setSelected([])}>
+            <Button size="sm" variant="outline" onClick={onSelectNone}>
               Keine
             </Button>
           </div>
@@ -519,16 +530,16 @@ function SemanticLinkPanel({
         {linking?.chosen && (
           <div
             className={`rounded-md border border-border p-2 ${
-              linking.inserted ? "" : "bg-muted/40 opacity-70"
+              linkingInserted ? "" : "bg-muted/40 opacity-70"
             }`}
           >
             <label className="flex cursor-pointer items-start gap-2">
               <input
                 type="checkbox"
                 className="mt-0.5"
-                disabled={!canManage || togglingLink || !linking.patched_block}
-                checked={linking.inserted}
-                onChange={() => toggleStep5()}
+                disabled={!canManage || !linking.patched_block}
+                checked={linkingInserted}
+                onChange={() => onToggleStep5()}
               />
               <span className="min-w-0 flex-1">
                 <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
@@ -543,7 +554,7 @@ function SemanticLinkPanel({
                     {linking.chosen.target_href} ↗
                   </a>
                   <Badge variant="outline" className="text-muted-foreground">
-                    {linking.inserted ? "intern bereits verlinkt" : "abgewählt"}
+                    {linkingInserted ? "intern verlinkt" : "abgewählt"}
                   </Badge>
                 </span>
                 <span className="mt-1 block text-muted-foreground">
@@ -600,80 +611,43 @@ function SemanticLinkPanel({
             ))}
           </ul>
         )}
+        {hasDuplicateSelection && (
+          <p className="text-sm text-amber-700">
+            Achtung: mehrere Vorschläge zeigen auf dieselbe URL – nur der erste wird übernommen.
+          </p>
+        )}
       </CardContent>
-      {hasSelectable && canManage && (
-        <CardFooter className="sticky bottom-0 z-10 justify-between gap-2 border-t border-border bg-surface/95 py-3 backdrop-blur">
-          <span className="text-sm text-muted-foreground">
-            {selected.length} ausgewählt
-            {hasDuplicateSelection && (
-              <span className="ml-2 text-amber-700">
-                · Achtung: mehrere Vorschläge zeigen auf dieselbe URL
-              </span>
-            )}
-          </span>
-          <Button size="sm" onClick={apply} disabled={busy || selected.length === 0}>
-            {busy ? "Übernehme…" : `${selected.length} Link(s) übernehmen`}
-          </Button>
-        </CardFooter>
-      )}
     </Card>
   );
 }
 
 function ImprovementPanel({
-  jobId,
   improve,
   blocks,
   country,
   language,
   canManage,
-  onApplied,
+  selected,
+  userTexts,
+  onToggle,
+  onSelectAll,
+  onSelectNone,
+  onUserText,
 }: {
-  jobId: string;
   improve: ImprovementResult;
   blocks: LocalizedBlock[] | undefined;
   country: string | undefined;
   language: string | undefined;
   canManage: boolean;
-  onApplied: () => void;
+  selected: string[];
+  userTexts: Record<string, string>;
+  onToggle: (id: string) => void;
+  onSelectAll: () => void;
+  onSelectNone: () => void;
+  onUserText: (id: string, value: string) => void;
 }) {
   const appliedIds = new Set(improve.applied);
-  const signature = improve.proposals.map((p) => p.id).join(",");
-  const [selected, setSelected] = useState<string[]>(() => improve.proposals.map((p) => p.id));
-  const [userTexts, setUserTexts] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
-
-  // Auswahl zurücksetzen, wenn sich die Vorschlagsmenge ändert (z. B. neuer Lauf).
-  useEffect(() => {
-    setSelected(improve.proposals.map((p) => p.id));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [signature]);
-
-  function toggle(id: string) {
-    setSelected((cur) => (cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id]));
-  }
-
-  async function apply() {
-    setBusy(true);
-    try {
-      const res = await applyImprovementsFn({
-        data: { jobId, proposalIds: selected, userTexts },
-      });
-      if (res.ok)
-        toast.success(
-          res.patched > 0
-            ? `${res.applied} Vorschläge übernommen (${res.patched} Textänderungen)`
-            : `${res.applied} Vorschläge übernommen`,
-        );
-      else toast.error(res.error ?? "Übernehmen fehlgeschlagen");
-      onApplied();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Fehler");
-    } finally {
-      setBusy(false);
-    }
-  }
 
   if (!improve.proposals.length) {
     return (
@@ -694,7 +668,7 @@ function ImprovementPanel({
         <div>
           <CardTitle className="text-base">Verbesserungen & Quellen</CardTitle>
           <p className="text-xs text-muted-foreground">
-            KI-Vorschläge – werden erst nach Bestätigung angewendet.
+            An-/abwählbar – wird mit „Alle Änderungen übernehmen“ angewendet.
           </p>
         </div>
         {canManage && (
@@ -702,11 +676,11 @@ function ImprovementPanel({
             <Button
               size="sm"
               variant="outline"
-              onClick={() => setSelected(improve.proposals.map((p) => p.id))}
+              onClick={() => onSelectAll()}
             >
               Alle auswählen
             </Button>
-            <Button size="sm" variant="outline" onClick={() => setSelected([])}>
+            <Button size="sm" variant="outline" onClick={() => onSelectNone()}>
               Keine
             </Button>
           </div>
@@ -717,19 +691,14 @@ function ImprovementPanel({
           const applied = appliedIds.has(p.id);
           const current = p.block_id ? blockById.get(p.block_id) : undefined;
           return (
-            <div
-              key={p.id}
-              className={`rounded-md border border-border p-2 ${
-                applied ? "bg-muted/40 opacity-60" : ""
-              }`}
-            >
+            <div key={p.id} className="rounded-md border border-border p-2">
               <label className="flex cursor-pointer items-start gap-2">
                 <input
                   type="checkbox"
                   className="mt-0.5"
-                  disabled={!canManage || applied}
+                  disabled={!canManage}
                   checked={selected.includes(p.id)}
-                  onChange={() => toggle(p.id)}
+                  onChange={() => onToggle(p.id)}
                 />
                 <span className="min-w-0 flex-1">
                   <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
@@ -769,7 +738,7 @@ function ImprovementPanel({
                   )}
                 </span>
               </label>
-              {p.kind === "quelle" && !applied && (
+              {p.kind === "quelle" && (
                 <div className="mt-2 rounded border border-dashed border-border bg-muted/30 p-2">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-medium text-muted-foreground">
@@ -791,20 +760,19 @@ function ImprovementPanel({
                   </pre>
                 </div>
               )}
-              {p.patch == null && !applied && (
+              {p.patch == null && (
                 <input
                   type="text"
                   placeholder="Quelle eintragen (URL oder Text) – wird als „Quelle: …“ ans Blockende angehängt"
                   className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-xs"
                   value={userTexts[p.id] ?? ""}
                   disabled={!canManage}
-                  onChange={(e) => setUserTexts((cur) => ({ ...cur, [p.id]: e.target.value }))}
+                  onChange={(e) => onUserText(p.id, e.target.value)}
                 />
               )}
               {p.kind === "verbesserung" &&
                 p.patch != null &&
-                typeof p.patch["text"] === "string" &&
-                !applied && (
+                typeof p.patch["text"] === "string" && (
                   <div className="mt-2">
                     <span className="text-xs font-medium text-muted-foreground">
                       Vorschlag (bearbeitbar) – direkt übernehmen oder anpassen:
@@ -814,7 +782,7 @@ function ImprovementPanel({
                       rows={4}
                       value={userTexts[p.id] ?? (p.patch["text"] as string)}
                       disabled={!canManage}
-                      onChange={(e) => setUserTexts((cur) => ({ ...cur, [p.id]: e.target.value }))}
+                      onChange={(e) => onUserText(p.id, e.target.value)}
                     />
                   </div>
                 )}
@@ -822,18 +790,6 @@ function ImprovementPanel({
           );
         })}
       </CardContent>
-      {canManage && (
-        <CardFooter className="sticky bottom-0 z-10 justify-between gap-2 border-t border-border bg-surface/95 py-3 backdrop-blur">
-          <span className="text-sm tabular-nums text-muted-foreground">
-            {selected.length} ausgewählt
-          </span>
-          <Button size="sm" onClick={apply} disabled={busy || selected.length === 0}>
-            {busy
-              ? "Übernehme…"
-              : `${selected.length} ${selected.length === 1 ? "Vorschlag" : "Vorschläge"} übernehmen`}
-          </Button>
-        </CardFooter>
-      )}
     </Card>
   );
 }
@@ -847,6 +803,12 @@ function JobDetail() {
   const [open, setOpen] = useState<string | null>(null);
   const [panelScrollRequest, setPanelScrollRequest] = useState(0);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // Pending Änderungen (werden mit „Alle Änderungen übernehmen“ angewendet).
+  const [linkingInserted, setLinkingInserted] = useState(false);
+  const [semanticSelected, setSemanticSelected] = useState<string[]>([]);
+  const [improveSelected, setImproveSelected] = useState<string[]>([]);
+  const [userTexts, setUserTexts] = useState<Record<string, string>>({});
+  const [applyingAll, setApplyingAll] = useState(false);
 
   const job = useQuery({
     queryKey: ["job", jobId],
@@ -981,6 +943,82 @@ function JobDetail() {
   const exportMd = typeof ctx.exportMarkdown === "string" ? ctx.exportMarkdown : undefined;
   const exportName = `${ctx.localized?.meta?.slug || `job-${jobId}`}.md`;
   const market = job.data?.markets as { country?: string; language?: string } | null | undefined;
+
+  // Pending-Zustand aus dem Kontext initialisieren/zurücksetzen.
+  const semSig = [
+    (ctx.semanticLinking?.inserted ?? []).map((i) => i.block_id).join(","),
+    ctx.semanticLinking
+      ? ctx.semanticLinking.keywords
+          .filter((k) => k.eligible && k.chosen)
+          .map((k) => k.block_id)
+          .join(",")
+      : "",
+    ctx.semanticLinking ? "1" : "0",
+  ].join("|");
+  useEffect(() => {
+    if (!ctx.semanticLinking) {
+      setSemanticSelected([]);
+      return;
+    }
+    if ((job.data?.semantic_links_pending ?? 0) > 0) {
+      // Frischer Lauf: empfohlene (≥ 80 %) + bereits eingesetzte Links vorauswählen.
+      const eligible = ctx.semanticLinking.keywords
+        .filter((k) => k.eligible && k.chosen)
+        .map((k) => k.block_id);
+      const inserted = ctx.semanticLinking.inserted.map((i) => i.block_id);
+      setSemanticSelected([...new Set([...eligible, ...inserted])]);
+    } else {
+      // Nach dem Übernehmen exakt den gespeicherten Zustand abbilden.
+      setSemanticSelected(ctx.semanticLinking.inserted.map((i) => i.block_id));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [semSig, job.data?.semantic_links_pending]);
+
+  useEffect(() => {
+    setLinkingInserted(ctx.linking?.inserted ?? false);
+  }, [ctx.linking?.inserted]);
+
+  const impSig = [
+    (ctx.improve?.proposals ?? []).map((p) => p.id).join(","),
+    (ctx.improve?.applied ?? []).join(","),
+    Object.keys(ctx.improve?.overrides ?? {}).join(","),
+    ctx.improve ? "1" : "0",
+  ].join("|");
+  useEffect(() => {
+    if (!ctx.improve) {
+      setImproveSelected([]);
+      setUserTexts({});
+      return;
+    }
+    setImproveSelected(ctx.improve.applied ?? []);
+    setUserTexts(ctx.improve.overrides ?? {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [impSig]);
+
+  async function applyAll() {
+    setApplyingAll(true);
+    try {
+      const res = await applyAllChangesFn({
+        data: {
+          jobId,
+          linkingInserted,
+          semanticBlockIds: semanticSelected,
+          improvementProposalIds: improveSelected,
+          userTexts,
+        },
+      });
+      if (res.ok)
+        toast.success(
+          `${res.inserted} Link(s), ${res.applied} Vorschlag/Vorschläge übernommen (${res.patched} Textänderungen)`,
+        );
+      else toast.error(res.error ?? "Übernehmen fehlgeschlagen");
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Fehler");
+    } finally {
+      setApplyingAll(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -1147,28 +1185,55 @@ function JobDetail() {
       {ctx.semanticLinking && (
         <div ref={panelRef}>
           <SemanticLinkPanel
-            jobId={jobId}
             semanticLinking={ctx.semanticLinking}
             blocks={ctx.localized?.blocks}
             sourceBlocks={ctx.source?.blocks}
             linking={ctx.linking}
             pending={job.data?.semantic_links_pending ?? 0}
             canManage={canManage}
-            onApplied={() => refresh()}
+            selected={semanticSelected}
+            linkingInserted={linkingInserted}
+            onToggle={(id) =>
+              setSemanticSelected((cur) =>
+                cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
+              )
+            }
+            onSelectAll={() =>
+              setSemanticSelected(
+                ctx.semanticLinking!.keywords.filter((k) => k.chosen).map((k) => k.block_id),
+              )
+            }
+            onSelectNone={() => setSemanticSelected([])}
+            onToggleStep5={() => setLinkingInserted((cur) => !cur)}
           />
         </div>
       )}
 
       {ctx.improve && (
-        <ImprovementPanel
-          jobId={jobId}
-          improve={ctx.improve}
-          blocks={ctx.localized?.blocks}
-          country={market?.country}
-          language={market?.language}
-          canManage={canManage}
-          onApplied={() => refresh()}
-        />
+        <>
+          <SourceFinderCard
+            country={market?.country}
+            language={market?.language}
+            title={ctx.localized?.meta?.title}
+          />
+          <ImprovementPanel
+            improve={ctx.improve}
+            blocks={ctx.localized?.blocks}
+            country={market?.country}
+            language={market?.language}
+            canManage={canManage}
+            selected={improveSelected}
+            userTexts={userTexts}
+            onToggle={(id) =>
+              setImproveSelected((cur) =>
+                cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
+              )
+            }
+            onSelectAll={() => setImproveSelected(ctx.improve!.proposals.map((p) => p.id))}
+            onSelectNone={() => setImproveSelected([])}
+            onUserText={(id, value) => setUserTexts((cur) => ({ ...cur, [id]: value }))}
+          />
+        </>
       )}
 
       {exportMd && (
@@ -1207,6 +1272,22 @@ function JobDetail() {
               {exportMd}
             </pre>
           </CardContent>
+        </Card>
+      )}
+
+      {canManage && (ctx.semanticLinking || ctx.improve || ctx.linking) && (
+        <Card className="border-2 border-primary/40 bg-surface">
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle className="text-base">Alle Änderungen übernehmen</CardTitle>
+              <p className="text-xs text-muted-foreground">
+                Wendet alle ausgewählten/abgewählten Links, Quellen und Verbesserungen in einem Schritt an.
+              </p>
+            </div>
+            <Button onClick={applyAll} disabled={applyingAll}>
+              {applyingAll ? "Übernehme…" : "Alle Änderungen übernehmen"}
+            </Button>
+          </CardHeader>
         </Card>
       )}
     </div>

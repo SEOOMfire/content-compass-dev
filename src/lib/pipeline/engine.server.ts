@@ -8,6 +8,7 @@ import {
   type JobContext,
   type LinkingResult,
   type LocalizedBlock,
+  type LocalizedDoc,
   type SemanticLinkingResult,
   type StepKey,
 } from "./types";
@@ -35,7 +36,7 @@ import {
 } from "./localize";
 import { reviewDocument } from "./review";
 import { checkLocalization } from "./check";
-import { proposeImprovements } from "./improve";
+import { applyImprovements, proposeImprovements } from "./improve";
 import { validateBlockPatch, type BlockContent } from "./validate";
 
 export { dependencyBlocker };
@@ -649,6 +650,141 @@ export async function setLinkingInsertedStep(
     .eq("step_key", "links");
   await syncJobStatus(jobId, nextContext);
   return { ok: true };
+}
+
+export interface ApplyAllChangesInput {
+  linkingInserted: boolean;
+  semanticBlockIds: string[];
+  improvementProposalIds: string[];
+  userTexts: Record<string, string>;
+}
+
+/**
+ * Wendet ALLE ausstehenden Änderungen in einem Durchgang an (reversibel):
+ * Schritt-5-Link an/ab, semantische Links (Auswahl), Verbesserungen/Quellen
+ * (Auswahl + Nutzertexte). Die Basis (`localized.blocks`) bleibt unverändert;
+ * der Export wird deterministisch aus Verbesserungen → Schritt-5-Link →
+ * semantische Links gerendert.
+ */
+export async function applyAllChangesStep(
+  jobId: string,
+  changes: ApplyAllChangesInput,
+): Promise<{ ok: boolean; inserted: number; applied: number; patched: number; error?: string }> {
+  const { data: job, error } = await supabaseAdmin
+    .from("jobs")
+    .select("*, markets(*)")
+    .eq("id", jobId)
+    .maybeSingle();
+  if (error || !job) throw new Error("Job nicht gefunden.");
+  const marketRow = (job as unknown as { markets: MarketRow }).markets;
+  const market = toMarketProfile(marketRow);
+  const context = ((job as { context?: JobContext }).context ?? {}) as JobContext;
+  if (!context.localized?.blocks?.length)
+    throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+
+  const sameLanguage = isGermanTarget(market);
+  const linking: LinkingResult | undefined = context.linking
+    ? { ...context.linking, inserted: changes.linkingInserted }
+    : context.linking;
+
+  // Verbesserungen als Overlay (Basis bleibt unverändert).
+  let improve: ImprovementResult | undefined = context.improve;
+  let improvedBlocks = context.localized.blocks;
+  let patched = 0;
+  if (improve) {
+    improve = {
+      ...improve,
+      applied: changes.improvementProposalIds,
+      overrides: changes.userTexts,
+    };
+    const r = applyImprovements(
+      context.localized,
+      context.source?.blocks ?? [],
+      improve,
+      sameLanguage,
+    );
+    improvedBlocks = r.blocks;
+    patched = r.patched;
+    improve = { ...improve, warnings: r.warnings };
+  }
+
+  const improvedLocalized: LocalizedDoc = { meta: context.localized.meta, blocks: improvedBlocks };
+
+  // Schritt-5-Link (respektiert linking.inserted) + semantische Links.
+  let semanticLinking: SemanticLinkingResult | undefined = context.semanticLinking;
+  let finalBlocks: LocalizedBlock[];
+  let inserted: { block_id: string; keyword: string; url: string }[] = [];
+  if (semanticLinking) {
+    const outcome = applySemanticLinks(
+      improvedLocalized,
+      linking,
+      semanticLinking,
+      changes.semanticBlockIds,
+    );
+    finalBlocks = outcome.blocks;
+    inserted = outcome.inserted;
+    semanticLinking = { ...semanticLinking, inserted };
+  } else {
+    finalBlocks = applyLinkingPatch(improvedLocalized, linking);
+  }
+
+  const exportMarkdown = renderMarkdown(finalBlocks, improvedLocalized.meta, {
+    closing_note: market.closing_note,
+  });
+
+  const nextContext: JobContext = {
+    ...context,
+    ...(linking ? { linking } : {}),
+    ...(semanticLinking ? { semanticLinking } : {}),
+    ...(improve ? { improve } : {}),
+    exportMarkdown,
+  };
+
+  await supabaseAdmin
+    .from("jobs")
+    .update({ context: nextContext as never, updated_at: new Date().toISOString() })
+    .eq("id", jobId);
+  if (linking) {
+    await supabaseAdmin
+      .from("job_steps")
+      .update({
+        output: { ...linking, export_length: exportMarkdown.length } as never,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("job_id", jobId)
+      .eq("step_key", "links");
+  }
+  if (semanticLinking) {
+    await supabaseAdmin
+      .from("job_steps")
+      .update({
+        output: { ...semanticLinking, export_length: exportMarkdown.length } as never,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("job_id", jobId)
+      .eq("step_key", "semantic_links");
+    await supabaseAdmin
+      .from("jobs")
+      .update({ semantic_links_pending: 0, updated_at: new Date().toISOString() })
+      .eq("id", jobId);
+  }
+  if (improve) {
+    await supabaseAdmin
+      .from("job_steps")
+      .update({
+        output: improve as never,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("job_id", jobId)
+      .eq("step_key", "improve");
+  }
+  await syncJobStatus(jobId, nextContext);
+  return {
+    ok: true,
+    inserted: inserted.length,
+    applied: changes.improvementProposalIds.length,
+    patched,
+  };
 }
 
 /**
