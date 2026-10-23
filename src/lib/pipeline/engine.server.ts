@@ -22,6 +22,7 @@ import {
   runPrompt,
   startVarRecording,
   collectRecordedVars,
+  webSearchCompletion,
   type PromptTemplateRow,
 } from "./ai.server";
 import { dependencyBlocker } from "./deps";
@@ -37,6 +38,7 @@ import {
 import { reviewDocument } from "./review";
 import { checkLocalization } from "./check";
 import { applyImprovements, proposeImprovements } from "./improve";
+import { researchSources } from "./sources";
 import { validateBlockPatch, type BlockContent } from "./validate";
 
 export { dependencyBlocker };
@@ -395,6 +397,33 @@ export async function runStep(
       return {
         output: res.improve,
         context: { improve: res.improve },
+        ...(res.stats.model ? { model: res.stats.model } : {}),
+        ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
+        tokensIn: res.stats.tokensIn,
+        tokensOut: res.stats.tokensOut,
+      };
+    }
+
+    case "sources": {
+      requireSource(ctx);
+      if (!ctx.localized) throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
+      if (typeof ctx.exportMarkdown !== "string")
+        throw new Error("Schritt 4 (Prüfen & Export) muss zuerst laufen.");
+      if (!ctx.improve)
+        throw new Error("Schritt 8 (Verbesserungen & Quellen) muss zuerst laufen.");
+      const res = await researchSources({
+        sourceUrl: job.source_url,
+        market,
+        ctx,
+        webSearch: (system, user) => webSearchCompletion(system, user),
+      });
+      const improve: ImprovementResult = {
+        ...ctx.improve,
+        overrides: { ...ctx.improve.overrides, ...res.overrides },
+      };
+      return {
+        output: { ...res.sources, overrides: res.overrides },
+        context: { sources: res.sources, improve },
         ...(res.stats.model ? { model: res.stats.model } : {}),
         ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
         tokensIn: res.stats.tokensIn,
@@ -1029,6 +1058,12 @@ function describeStepInput(
         findings: ctx.findings?.length ?? 0,
         removed_blocks: (ctx.localized?.blocks ?? []).filter((b) => b.removed).length,
         export_length: ctx.exportMarkdown?.length ?? 0,
+        market: marketInfo,
+      };
+    case "sources":
+      return {
+        source_proposals: (ctx.improve?.proposals ?? []).filter((p) => p.kind === "quelle").length,
+        filled_overrides: Object.keys(ctx.improve?.overrides ?? {}).length,
         market: marketInfo,
       };
     default:

@@ -126,8 +126,7 @@ async function gatewayError(res: Response): Promise<Error> {
   return new Error(message);
 }
 
-export function extractJson(raw: string): unknown {
-  const cleaned = raw.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+export function extractJson(raw: string): unknown {  const cleaned = raw.replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
   try {
     return JSON.parse(cleaned);
   } catch {
@@ -188,4 +187,56 @@ export async function runPrompt<T = unknown>(
     }
   }
   throw lastError instanceof Error ? lastError : new Error("LLM-Aufruf fehlgeschlagen");
+}
+
+export interface WebSearchResult {
+  text: string;
+  citations: { url: string; title: string | null }[];
+  tokensIn: number;
+  tokensOut: number;
+}
+
+/**
+ * OpenAI Chat Completions mit integriertem web_search-Tool (gpt-4o-mini).
+ * Liefert die Antwort und die Quellen-Zitationen (url_citation-Annotationen).
+ */
+export async function webSearchCompletion(
+  system: string,
+  user: string,
+): Promise<WebSearchResult> {
+  const params: Record<string, unknown> = {
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    tools: [{ type: "web_search" }],
+    temperature: 0.2,
+    max_tokens: 2000,
+  };
+  const res = await fetch(`${BASE_URL}/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey()}` },
+    body: JSON.stringify(params),
+  });
+  if (!res.ok) throw await gatewayError(res);
+  const json = (await res.json()) as {
+    choices?: {
+      message?: {
+        content?: string;
+        annotations?: { type?: string; url?: string; title?: string }[];
+      };
+    }[];
+    usage?: { prompt_tokens?: number; completion_tokens?: number };
+  };
+  const message = json.choices?.[0]?.message;
+  const citations = (message?.annotations ?? [])
+    .filter((a) => a?.type === "url_citation" && typeof a?.url === "string")
+    .map((a) => ({ url: a.url as string, title: typeof a.title === "string" ? a.title : null }));
+  return {
+    text: message?.content ?? "",
+    citations,
+    tokensIn: json.usage?.prompt_tokens ?? 0,
+    tokensOut: json.usage?.completion_tokens ?? 0,
+  };
 }

@@ -13,7 +13,8 @@ export type StepKey =
   | "links"
   | "semantic_links"
   | "check"
-  | "improve";
+  | "improve"
+  | "sources";
 
 export interface StepDef {
   key: StepKey;
@@ -87,6 +88,13 @@ export const PIPELINE: StepDef[] = [
     promptKey: "improvement_proposals",
     description:
       "Schlägt inhaltliche Verbesserungen und fehlende Zielmarkt-Quellen vor – Anwendung erst nach Bestätigung.",
+  },
+  {
+    key: "sources",
+    order: 9,
+    label: "9 · Quellenrecherche",
+    description:
+      "Sucht per OpenAI-Websuche automatisch nach passenden Quellen (je „Quelle“-Vorschlag und E-E-A-T) und füllt die Felder vor.",
   },
 ];
 
@@ -305,6 +313,20 @@ export interface ImprovementResult {
   warnings: string[];
 }
 
+/** Eine gefundene Quelle (Name + URL). */
+export interface SourceSuggestion {
+  name: string;
+  url: string;
+}
+
+/** Ergebnis von Schritt 9 (Quellenrecherche). */
+export interface SourcesResult {
+  /** Gefundene E-E-A-T-Quellen für den ganzen Artikel (nur Anzeige). */
+  eeat: SourceSuggestion[];
+  notes: string[];
+  warnings: string[];
+}
+
 export interface JobContext {
   source?: SourceDoc;
   findings?: Finding[];
@@ -315,6 +337,7 @@ export interface JobContext {
   semanticLinking?: SemanticLinkingResult;
   check?: CheckResult;
   improve?: ImprovementResult;
+  sources?: SourcesResult;
 }
 
 /**
@@ -331,6 +354,7 @@ export const STEP_CONTEXT_KEYS: Record<StepKey, (keyof JobContext)[]> = {
   semantic_links: ["semanticLinking"],
   check: ["check"],
   improve: ["improve"],
+  sources: ["sources"],
 };
 
 /**

@@ -28,6 +28,7 @@ import {
   type ReviewIssue,
   type SemanticKeyword,
   type SemanticLinkingResult,
+  type SourceSuggestion,
 } from "@/lib/pipeline/types";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -309,10 +310,12 @@ function SourceFinderCard({
   country,
   language,
   title,
+  sources,
 }: {
   country: string | undefined;
   language: string | undefined;
   title: string | undefined;
+  sources: SourceSuggestion[];
 }) {
   return (
     <Card className="border-border bg-surface">
@@ -334,7 +337,28 @@ function SourceFinderCard({
           <Copy className="mr-1 h-3 w-3" /> Prompt kopieren
         </Button>
       </CardHeader>
-      <CardContent className="pt-0">
+      <CardContent className="space-y-2 pt-0">
+        {sources.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-muted-foreground">
+              Gefundene Quellen (Schritt 9):
+            </p>
+            <ul className="mt-1 list-disc space-y-0.5 pl-5">
+              {sources.map((s, i) => (
+                <li key={i}>
+                  <a
+                    href={s.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-primary underline-offset-2 hover:underline"
+                  >
+                    {s.name || s.url}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <pre className="whitespace-pre-wrap text-xs text-muted-foreground">
           {eeatSourcesPrompt(country, language, title)}
         </pre>
@@ -1149,6 +1173,14 @@ function JobDetail() {
                     </p>
                   )}
 
+                  {def.key === "sources" && (
+                    <p className="text-muted-foreground">
+                      {output && Array.isArray(output["eeat"])
+                        ? `E-E-A-T-Quellen: ${(output["eeat"] as unknown[]).length} · „Quelle“-Felder vorausgefüllt.`
+                        : "Quellen-Recherche abgeschlossen."}
+                    </p>
+                  )}
+
                   {step?.prompt_snapshot && (
                     <details>
                       <summary className="cursor-pointer text-muted-foreground">
@@ -1165,7 +1197,8 @@ function JobDetail() {
                       def.key !== "review" &&
                       def.key !== "links" &&
                       def.key !== "semantic_links" &&
-                      def.key !== "improve"
+                      def.key !== "improve" &&
+                      def.key !== "sources"
                     }
                   >
                     <summary className="cursor-pointer text-muted-foreground">
@@ -1215,6 +1248,7 @@ function JobDetail() {
             country={market?.country}
             language={market?.language}
             title={ctx.localized?.meta?.title}
+            sources={ctx.sources?.eeat ?? []}
           />
           <ImprovementPanel
             improve={ctx.improve}
