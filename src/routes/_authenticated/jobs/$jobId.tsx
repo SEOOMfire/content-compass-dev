@@ -20,7 +20,6 @@ import {
   PIPELINE,
   type Block,
   type Finding,
-  type ImprovementProposal,
   type ImprovementResult,
   type JobContext,
   type LinkingResult,
@@ -250,41 +249,6 @@ function sentenceFor(text: string, keyword: string): string {
   while (end < text.length && !/[.!?\n]/.test(text.charAt(end))) end++;
   if (end < text.length && /[.!?]/.test(text.charAt(end))) end++;
   return text.slice(start, end).trim();
-}
-
-/** Flache Textvorschau eines Verbesserungs-Patches. */
-function patchPreview(patch: ImprovementProposal["patch"]): string | null {
-  if (!patch) return null;
-  if (typeof patch["text"] === "string") return patch["text"];
-  if (Array.isArray(patch["items"]))
-    return (patch["items"] as unknown[])
-      .map((it) => (typeof it === "string" ? it : JSON.stringify(it)))
-      .join("\n");
-  if (Array.isArray(patch["rows"]))
-    return (patch["rows"] as string[][]).map((r) => r.join(" | ")).join("\n");
-  return JSON.stringify(patch);
-}
-
-/** Fertiger, kurzer Such-Prompt zum Kopieren nach ChatGPT – Antwort passt direkt ins Quellen-Feld. */
-function sourceSearchPrompt(
-  p: ImprovementProposal,
-  country?: string,
-  language?: string,
-): string {
-  const market = country || language ? `${country ?? "der Zielmarkt"}${language ? ` (${language})` : ""}` : "den Zielmarkt";
-  const topic = [p.problem, p.suggestion].filter(Boolean).join(" ");
-  return [
-    `Du hilfst, für einen lokalisierten Artikel eine fehlende Quelle zu finden. Zielmarkt: ${market}.`,
-    "",
-    `Thema: ${topic}`,
-    "",
-    `Suche, ob es dafür eine konkrete Quelle/Lösung für ${country ?? "den Zielmarkt"} gibt.`,
-    "",
-    "Antworte NUR mit dem direkt verwertbaren Ergebnis (max. 1 Zeile):",
-    "„Name der Quelle – URL“ – oder „keine“, wenn nichts gefunden wurde.",
-    "",
-    "Keine Einleitung, keine Erklärungen, keine Alternativen.",
-  ].join("\n");
 }
 
 function EeatSourcesCard({
@@ -617,9 +581,6 @@ function SemanticLinkPanel({
 
 function ImprovementPanel({
   improve,
-  blocks,
-  country,
-  language,
   canManage,
   selected,
   userTexts,
@@ -629,9 +590,6 @@ function ImprovementPanel({
   onUserText,
 }: {
   improve: ImprovementResult;
-  blocks: LocalizedBlock[] | undefined;
-  country: string | undefined;
-  language: string | undefined;
   canManage: boolean;
   selected: string[];
   userTexts: Record<string, string>;
@@ -642,13 +600,12 @@ function ImprovementPanel({
 }) {
   const appliedIds = new Set(improve.applied);
   const sourceProposals = improve.proposals.filter((p) => p.kind === "quelle");
-  const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
 
   if (!sourceProposals.length) {
     return (
       <Card className="border-border bg-surface">
         <CardHeader>
-          <CardTitle className="text-base">Verbesserungen & Quellen</CardTitle>
+          <CardTitle className="text-base">Quellen im Text</CardTitle>
         </CardHeader>
         <CardContent className="pt-0">
           <p className="text-sm text-muted-foreground">Keine Quellen-Vorschläge.</p>
@@ -660,19 +617,10 @@ function ImprovementPanel({
   return (
     <Card className="border-border bg-surface">
       <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
-        <div>
-          <CardTitle className="text-base">Verbesserungen & Quellen</CardTitle>
-          <p className="text-xs text-muted-foreground">
-            An-/abwählbar – wird mit „Alle Änderungen übernehmen“ angewendet.
-          </p>
-        </div>
+        <CardTitle className="text-base">Quellen im Text</CardTitle>
         {canManage && (
           <div className="flex shrink-0 gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => onSelectAll()}
-            >
+            <Button size="sm" variant="outline" onClick={() => onSelectAll()}>
               Alle auswählen
             </Button>
             <Button size="sm" variant="outline" onClick={() => onSelectNone()}>
@@ -684,7 +632,6 @@ function ImprovementPanel({
       <CardContent className="space-y-2">
         {sourceProposals.map((p) => {
           const applied = appliedIds.has(p.id);
-          const current = p.block_id ? blockById.get(p.block_id) : undefined;
           return (
             <div key={p.id} className="rounded-md border border-border p-2">
               <label className="flex cursor-pointer items-start gap-2">
@@ -714,45 +661,8 @@ function ImprovementPanel({
                       Empfehlung: {p.suggestion}
                     </span>
                   )}
-                  {(current || p.patch) && (
-                    <details className="mt-1">
-                      <summary className="cursor-pointer text-muted-foreground">Details</summary>
-                      {current && (
-                        <span className="mt-1 block border-l-2 border-border pl-2 text-muted-foreground">
-                          Aktuell: {blockPlainText(current)}
-                        </span>
-                      )}
-                      {p.patch && (
-                        <span className="mt-1 block border-l-2 border-emerald-400 pl-2 text-emerald-700">
-                          Vorschlag: {patchPreview(p.patch)}
-                        </span>
-                      )}
-                    </details>
-                  )}
                 </span>
               </label>
-              {p.kind === "quelle" && (
-                <div className="mt-2 rounded border border-dashed border-border bg-muted/30 p-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-medium text-muted-foreground">
-                      Such-Prompt für ChatGPT
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        navigator.clipboard.writeText(sourceSearchPrompt(p, country, language));
-                        toast.success("Such-Prompt kopiert");
-                      }}
-                    >
-                      <Copy className="mr-1 h-3 w-3" /> Kopieren
-                    </Button>
-                  </div>
-                  <pre className="mt-1 whitespace-pre-wrap text-xs text-muted-foreground">
-                    {sourceSearchPrompt(p, country, language)}
-                  </pre>
-                </div>
-              )}
               {p.patch == null && (
                 <input
                   type="text"
@@ -1228,9 +1138,6 @@ function JobDetail() {
           />
           <ImprovementPanel
             improve={ctx.improve}
-            blocks={ctx.localized?.blocks}
-            country={market?.country}
-            language={market?.language}
             canManage={canManage}
             selected={improveSelected}
             userTexts={userTexts}
