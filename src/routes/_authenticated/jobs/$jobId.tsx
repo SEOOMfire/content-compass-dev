@@ -289,32 +289,49 @@ function sourceSearchPrompt(
 
 function EeatSourcesCard({
   sources,
+  manual,
   selected,
   canManage,
   onToggle,
+  onAddManual,
 }: {
   sources: SourceSuggestion[];
+  manual: SourceSuggestion[];
   selected: string[];
   canManage: boolean;
   onToggle: (url: string) => void;
+  onAddManual: (name: string, url: string) => void;
 }) {
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("");
+  const all = [...sources, ...manual];
+
+  function add() {
+    const n = name.trim();
+    const u = url.trim();
+    if (!n || !u) return;
+    onAddManual(n, u);
+    setName("");
+    setUrl("");
+  }
+
   return (
     <Card className="border-border bg-surface">
       <CardHeader>
         <CardTitle className="text-base">EEAT Quellen</CardTitle>
         <p className="text-xs text-muted-foreground">
-          Anerkannte Quellen – zum Übernehmen auswählen.
+          Anerkannte Quellen – zum Übernehmen auswählen oder manuell ergänzen.
         </p>
       </CardHeader>
       <CardContent className="space-y-2 pt-0">
-        {sources.length === 0 ? (
+        {all.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            Noch keine Quellen gefunden – Schritt 9 ausführen.
+            Noch keine Quellen gefunden – Schritt 9 ausführen oder unten manuell ergänzen.
           </p>
         ) : (
-          sources.map((s) => (
+          all.map((s, i) => (
             <label
-              key={s.url}
+              key={`${s.url}-${i}`}
               className="flex cursor-pointer items-start gap-2 rounded-md border border-border p-2"
             >
               <input
@@ -339,6 +356,32 @@ function EeatSourcesCard({
               </span>
             </label>
           ))
+        )}
+        {canManage && (
+          <div className="mt-3 flex flex-wrap gap-2 border-t border-border pt-3">
+            <input
+              type="text"
+              placeholder="Name der Quelle"
+              className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+            <input
+              type="text"
+              placeholder="URL"
+              className="min-w-0 flex-1 rounded border border-border bg-background px-2 py-1 text-xs"
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={add}
+              disabled={!name.trim() || !url.trim()}
+            >
+              Hinzufügen
+            </Button>
+          </div>
         )}
       </CardContent>
     </Card>
@@ -374,7 +417,6 @@ function SemanticLinkPanel({
 }) {
   const eligible = semanticLinking.keywords.filter((k) => k.eligible && k.chosen);
   const below = semanticLinking.keywords.filter((k) => !k.eligible && k.chosen);
-  const noCandidate = semanticLinking.keywords.filter((k) => !k.chosen);
   const selectable = [...eligible, ...below];
   const insertedIds = new Set(semanticLinking.inserted.map((i) => i.block_id));
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
@@ -426,9 +468,6 @@ function SemanticLinkPanel({
               >
                 {k.chosen!.title || url} ↗
               </a>
-              <Badge variant="secondary" className="tabular-nums">
-                {(k.chosen!.probability * 100).toFixed(0)} %
-              </Badge>
               {dupCount > 1 && (
                 <span className="tabular-nums text-muted-foreground">
                   · {dupCount}× vorgeschlagen
@@ -456,36 +495,6 @@ function SemanticLinkPanel({
                 {deText.length > 280 ? `${deText.slice(0, 280)}…` : deText}
               </span>
             )}
-            <details className="mt-1">
-              <summary className="cursor-pointer text-muted-foreground">Details</summary>
-              <span className="mt-1 block text-muted-foreground">
-                Block: <span className="tabular-nums">{k.block_id}</span>
-                {k.intent && <> · Intent: {k.intent}</>} · Similarity{" "}
-                <span className="tabular-nums">{k.chosen!.similarity.toFixed(2)}</span>
-              </span>
-              {k.candidates.length > 1 && (
-                <ul className="mt-1 space-y-0.5 pl-4">
-                  {k.candidates.map((c, i) => (
-                    <li key={i} className="break-all">
-                      <span className="tabular-nums text-muted-foreground">
-                        {c.probability == null
-                          ? "—"
-                          : `${(c.probability * 100).toFixed(0)} %`}
-                      </span>{" "}
-                      · Sim {c.similarity.toFixed(2)} ·{" "}
-                      <a
-                        href={c.url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-primary underline-offset-2 hover:underline"
-                      >
-                        {c.title || c.url}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </details>
           </span>
         </label>
       </div>
@@ -576,34 +585,17 @@ function SemanticLinkPanel({
           <>
             {eligible.length > 0 && (
               <div className="space-y-2">
-                <p className="text-sm font-medium">Passende Vorschläge (≥ 80 %)</p>
+                <p className="text-sm font-medium">Links mit hoher Wahrscheinlichkeit</p>
                 {eligible.map(row)}
               </div>
             )}
             {below.length > 0 && (
               <div className="space-y-2">
-                <p className="text-sm font-medium">Weitere Vorschläge (unter 80 %)</p>
+                <p className="text-sm font-medium">Links mit mittlerer Wahrscheinlichkeit</p>
                 {below.map(row)}
               </div>
             )}
           </>
-        )}
-
-        {noCandidate.length > 0 && (
-          <details>
-            <summary className="cursor-pointer text-muted-foreground">
-              Keine Kandidaten · {noCandidate.length}
-            </summary>
-            <ul className="mt-1 space-y-0.5 pl-4">
-              {noCandidate.map((k) => (
-                <li key={k.block_id}>
-                  <span className="tabular-nums text-muted-foreground">{k.block_id}</span> ·{" "}
-                  <strong>{k.keyword}</strong>
-                  <span className="text-muted-foreground"> · {k.note ?? "kein Kandidat"}</span>
-                </li>
-              ))}
-            </ul>
-          </details>
         )}
 
         {semanticLinking.notes.length > 0 && (
@@ -649,16 +641,17 @@ function ImprovementPanel({
   onUserText: (id: string, value: string) => void;
 }) {
   const appliedIds = new Set(improve.applied);
+  const sourceProposals = improve.proposals.filter((p) => p.kind === "quelle");
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
 
-  if (!improve.proposals.length) {
+  if (!sourceProposals.length) {
     return (
       <Card className="border-border bg-surface">
         <CardHeader>
           <CardTitle className="text-base">Verbesserungen & Quellen</CardTitle>
         </CardHeader>
         <CardContent className="pt-0">
-          <p className="text-sm text-muted-foreground">Keine Vorschläge.</p>
+          <p className="text-sm text-muted-foreground">Keine Quellen-Vorschläge.</p>
         </CardContent>
       </Card>
     );
@@ -689,7 +682,7 @@ function ImprovementPanel({
         )}
       </CardHeader>
       <CardContent className="space-y-2">
-        {improve.proposals.map((p) => {
+        {sourceProposals.map((p) => {
           const applied = appliedIds.has(p.id);
           const current = p.block_id ? blockById.get(p.block_id) : undefined;
           return (
@@ -704,9 +697,7 @@ function ImprovementPanel({
                 />
                 <span className="min-w-0 flex-1">
                   <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                    <Badge variant={p.kind === "verbesserung" ? "default" : "secondary"}>
-                      {p.kind === "verbesserung" ? "Verbesserung" : "Quelle"}
-                    </Badge>
+                    <Badge variant="secondary">Quelle</Badge>
                     <strong>{p.title}</strong>
                     {p.block_id && (
                       <span className="tabular-nums text-muted-foreground">· {p.block_id}</span>
@@ -772,22 +763,6 @@ function ImprovementPanel({
                   onChange={(e) => onUserText(p.id, e.target.value)}
                 />
               )}
-              {p.kind === "verbesserung" &&
-                p.patch != null &&
-                typeof p.patch["text"] === "string" && (
-                  <div className="mt-2">
-                    <span className="text-xs font-medium text-muted-foreground">
-                      Vorschlag (bearbeitbar) – direkt übernehmen oder anpassen:
-                    </span>
-                    <textarea
-                      className="mt-1 w-full rounded border border-border bg-background px-2 py-1 text-xs"
-                      rows={4}
-                      value={userTexts[p.id] ?? (p.patch["text"] as string)}
-                      disabled={!canManage}
-                      onChange={(e) => onUserText(p.id, e.target.value)}
-                    />
-                  </div>
-                )}
             </div>
           );
         })}
@@ -811,6 +786,7 @@ function JobDetail() {
   const [improveSelected, setImproveSelected] = useState<string[]>([]);
   const [userTexts, setUserTexts] = useState<Record<string, string>>({});
   const [eeatSelected, setEeatSelected] = useState<string[]>([]);
+  const [manualEeat, setManualEeat] = useState<SourceSuggestion[]>([]);
   const [applyingAll, setApplyingAll] = useState(false);
 
   const job = useQuery({
@@ -1019,6 +995,7 @@ function JobDetail() {
           improvementProposalIds: improveSelected,
           userTexts,
           selectedEeat: eeatSelected,
+          manualEeat,
         },
       });
       if (res.ok)
@@ -1026,6 +1003,7 @@ function JobDetail() {
           `${res.inserted} Link(s), ${res.applied} Vorschlag/Vorschläge übernommen (${res.patched} Textänderungen)`,
         );
       else toast.error(res.error ?? "Übernehmen fehlgeschlagen");
+      setManualEeat([]);
       await refresh();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Fehler");
@@ -1236,12 +1214,16 @@ function JobDetail() {
         <>
           <EeatSourcesCard
             sources={ctx.sources?.eeat ?? []}
+            manual={manualEeat}
             selected={eeatSelected}
             canManage={canManage}
             onToggle={(url) =>
               setEeatSelected((cur) =>
                 cur.includes(url) ? cur.filter((x) => x !== url) : [...cur, url],
               )
+            }
+            onAddManual={(n, u) =>
+              setManualEeat((cur) => [...cur, { name: n, url: u, reason: "" }])
             }
           />
           <ImprovementPanel
@@ -1257,7 +1239,11 @@ function JobDetail() {
                 cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
               )
             }
-            onSelectAll={() => setImproveSelected(ctx.improve!.proposals.map((p) => p.id))}
+            onSelectAll={() =>
+              setImproveSelected(
+                ctx.improve!.proposals.filter((p) => p.kind === "quelle").map((p) => p.id),
+              )
+            }
             onSelectNone={() => setImproveSelected([])}
             onUserText={(id, value) => setUserTexts((cur) => ({ ...cur, [id]: value }))}
           />

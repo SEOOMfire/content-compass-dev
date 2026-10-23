@@ -160,6 +160,9 @@ export const applyAllChangesFn = createServerFn({ method: "POST" })
         improvementProposalIds: z.array(z.string()),
         userTexts: z.record(z.string()),
         selectedEeat: z.array(z.string()),
+        manualEeat: z.array(
+          z.object({ name: z.string(), url: z.string(), reason: z.string() }),
+        ),
       })
       .parse(d),
   )
@@ -173,6 +176,7 @@ export const applyAllChangesFn = createServerFn({ method: "POST" })
       improvementProposalIds: data.improvementProposalIds,
       userTexts: data.userTexts,
       selectedEeat: data.selectedEeat,
+      manualEeat: data.manualEeat,
     });
     return res;
   });

@@ -689,6 +689,7 @@ export interface ApplyAllChangesInput {
   improvementProposalIds: string[];
   userTexts: Record<string, string>;
   selectedEeat: string[];
+  manualEeat: SourceSuggestion[];
 }
 
 /**
@@ -767,9 +768,13 @@ export async function applyAllChangesStep(
   // Ausgewählte E-E-A-T-Quellen ans Ende des Exports anhängen (reversibel).
   let sources: SourcesResult | undefined = context.sources;
   if (sources) {
-    sources = { ...sources, selected: changes.selectedEeat };
+    const merged = [...sources.eeat];
+    for (const m of changes.manualEeat) {
+      if (!merged.some((s) => s.url === m.url)) merged.push(m);
+    }
+    sources = { ...sources, eeat: merged, selected: changes.selectedEeat };
     const selectedSources = changes.selectedEeat
-      .map((url) => sources!.eeat.find((s) => s.url === url))
+      .map((url) => merged.find((s) => s.url === url))
       .filter((s): s is SourceSuggestion => Boolean(s));
     if (selectedSources.length) {
       const lines = selectedSources.map((s) => `- [${s.name}](${s.url})`);
