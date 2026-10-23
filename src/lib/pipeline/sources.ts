@@ -72,7 +72,7 @@ export async function researchSources(args: SourcesArgs): Promise<SourcesOutcome
         const r = await args.webSearch(SOURCE_SYSTEM, user);
         addStats(stats, {
           data: r.text,
-          model: "gpt-4o-mini",
+          model: r.model,
           promptSnapshot: "",
           tokensIn: r.tokensIn,
           tokensOut: r.tokensOut,
@@ -94,7 +94,7 @@ export async function researchSources(args: SourcesArgs): Promise<SourcesOutcome
     const r = await args.webSearch(EEAT_SYSTEM, eeatUser);
     addStats(stats, {
       data: r.text,
-      model: "gpt-4o-mini",
+      model: r.model,
       promptSnapshot: "",
       tokensIn: r.tokensIn,
       tokensOut: r.tokensOut,

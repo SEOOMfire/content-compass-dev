@@ -192,28 +192,37 @@ export async function runPrompt<T = unknown>(
 export interface WebSearchResult {
   text: string;
   citations: { url: string; title: string | null }[];
+  model: string;
   tokensIn: number;
   tokensOut: number;
 }
 
+/** Modell für die automatisierte Websuche (Schritt 9). */
+export const WEB_SEARCH_MODEL = "gpt-4.1";
+
 /**
- * OpenAI Chat Completions mit integriertem web_search-Tool (gpt-4o-mini).
+ * OpenAI Chat Completions mit integriertem web_search-Tool.
  * Liefert die Antwort und die Quellen-Zitationen (url_citation-Annotationen).
  */
 export async function webSearchCompletion(
   system: string,
   user: string,
 ): Promise<WebSearchResult> {
+  const id = modelId(WEB_SEARCH_MODEL);
   const params: Record<string, unknown> = {
-    model: "gpt-4o-mini",
+    model: id,
     messages: [
       { role: "system", content: system },
       { role: "user", content: user },
     ],
     tools: [{ type: "web_search" }],
     temperature: 0.2,
-    max_tokens: 2000,
   };
+  if (usesCompletionTokens(id)) {
+    params["max_completion_tokens"] = 2000;
+  } else {
+    params["max_tokens"] = 2000;
+  }
   const res = await fetch(`${BASE_URL}/chat/completions`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey()}` },
@@ -236,6 +245,7 @@ export async function webSearchCompletion(
   return {
     text: message?.content ?? "",
     citations,
+    model: id,
     tokensIn: json.usage?.prompt_tokens ?? 0,
     tokensOut: json.usage?.completion_tokens ?? 0,
   };
