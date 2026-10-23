@@ -159,6 +159,7 @@ export const applyAllChangesFn = createServerFn({ method: "POST" })
         semanticBlockIds: z.array(z.string()),
         improvementProposalIds: z.array(z.string()),
         userTexts: z.record(z.string()),
+        selectedEeat: z.array(z.string()),
       })
       .parse(d),
   )
@@ -171,6 +172,7 @@ export const applyAllChangesFn = createServerFn({ method: "POST" })
       semanticBlockIds: data.semanticBlockIds,
       improvementProposalIds: data.improvementProposalIds,
       userTexts: data.userTexts,
+      selectedEeat: data.selectedEeat,
     });
     return res;
   });

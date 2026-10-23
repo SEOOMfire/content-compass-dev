@@ -287,81 +287,59 @@ function sourceSearchPrompt(
   ].join("\n");
 }
 
-/** Fertiger Prompt, um für den ganzen Artikel anerkannte E-E-A-T-Quellen im Zielland zu finden. */
-function eeatSourcesPrompt(country?: string, language?: string, title?: string): string {
-  const market = country || language
-    ? `${country ?? "den Zielmarkt"}${language ? ` (${language})` : ""}`
-    : "den Zielmarkt";
-  return [
-    `Du hilfst, für einen lokalisierten Artikel passende, anerkannte Quellen zu finden. Zielmarkt: ${market}.`,
-    "",
-    `Thema des Artikels: ${title ?? "siehe unten"}`,
-    "",
-    `Finde seriöse, anerkannte und vertrauenswürdige Quellen aus ${country ?? "dem Zielmarkt"} (Behörden, Fachverbände, wissenschaftliche Institutionen, renommierte Fachportale), die für E-E-A-T (Experience, Expertise, Authoritativeness, Trustworthiness) als Beleg/Referenz geeignet sind.`,
-    "",
-    "Gib NUR eine kurze Liste zurück, direkt zum Einfügen – je Quelle eine Zeile:",
-    "„Name der Quelle – URL“",
-    "",
-    "Keine Einleitung, keine Erklärungen, keine Alternativen.",
-  ].join("\n");
-}
-
-function SourceFinderCard({
-  country,
-  language,
-  title,
+function EeatSourcesCard({
   sources,
+  selected,
+  canManage,
+  onToggle,
 }: {
-  country: string | undefined;
-  language: string | undefined;
-  title: string | undefined;
   sources: SourceSuggestion[];
+  selected: string[];
+  canManage: boolean;
+  onToggle: (url: string) => void;
 }) {
   return (
     <Card className="border-border bg-surface">
-      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
-        <div>
-          <CardTitle className="text-base">Passende Quellen finden</CardTitle>
-          <p className="text-xs text-muted-foreground">
-            Erzeugt einen Prompt, der im Zielland anerkannte Quellen für E-E-A-T findet.
-          </p>
-        </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => {
-            navigator.clipboard.writeText(eeatSourcesPrompt(country, language, title));
-            toast.success("Such-Prompt kopiert");
-          }}
-        >
-          <Copy className="mr-1 h-3 w-3" /> Prompt kopieren
-        </Button>
+      <CardHeader>
+        <CardTitle className="text-base">EEAT Quellen</CardTitle>
+        <p className="text-xs text-muted-foreground">
+          Anerkannte Quellen – zum Übernehmen auswählen.
+        </p>
       </CardHeader>
       <CardContent className="space-y-2 pt-0">
-        {sources.length > 0 && (
-          <div>
-            <p className="text-xs font-medium text-muted-foreground">
-              Gefundene Quellen (Schritt 9):
-            </p>
-            <ul className="mt-1 list-disc space-y-0.5 pl-5">
-              {sources.map((s, i) => (
-                <li key={i}>
-                  <a
-                    href={s.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-primary underline-offset-2 hover:underline"
-                  >
-                    {s.name || s.url}
-                  </a>
-                </li>
-              ))}
-            </ul>
-          </div>
+        {sources.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            Noch keine Quellen gefunden – Schritt 9 ausführen.
+          </p>
+        ) : (
+          sources.map((s) => (
+            <label
+              key={s.url}
+              className="flex cursor-pointer items-start gap-2 rounded-md border border-border p-2"
+            >
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                disabled={!canManage}
+                checked={selected.includes(s.url)}
+                onChange={() => onToggle(s.url)}
+              />
+              <span className="min-w-0 flex-1">
+                <a
+                  href={s.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-primary underline-offset-2 hover:underline"
+                >
+                  {s.name || s.url}
+                </a>
+                {s.reason && (
+                  <span className="mt-0.5 block text-muted-foreground">{s.reason}</span>
+                )}
+              </span>
+            </label>
+          ))
         )}
-        <pre className="whitespace-pre-wrap text-xs text-muted-foreground">
-          {eeatSourcesPrompt(country, language, title)}
-        </pre>
       </CardContent>
     </Card>
   );
@@ -832,6 +810,7 @@ function JobDetail() {
   const [semanticSelected, setSemanticSelected] = useState<string[]>([]);
   const [improveSelected, setImproveSelected] = useState<string[]>([]);
   const [userTexts, setUserTexts] = useState<Record<string, string>>({});
+  const [eeatSelected, setEeatSelected] = useState<string[]>([]);
   const [applyingAll, setApplyingAll] = useState(false);
 
   const job = useQuery({
@@ -1019,6 +998,16 @@ function JobDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [impSig]);
 
+  const srcSig = [
+    (ctx.sources?.eeat ?? []).map((s) => s.url).join(","),
+    (ctx.sources?.selected ?? []).join(","),
+    ctx.sources ? "1" : "0",
+  ].join("|");
+  useEffect(() => {
+    setEeatSelected(ctx.sources?.selected ?? []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [srcSig]);
+
   async function applyAll() {
     setApplyingAll(true);
     try {
@@ -1029,6 +1018,7 @@ function JobDetail() {
           semanticBlockIds: semanticSelected,
           improvementProposalIds: improveSelected,
           userTexts,
+          selectedEeat: eeatSelected,
         },
       });
       if (res.ok)
@@ -1244,11 +1234,15 @@ function JobDetail() {
 
       {ctx.improve && (
         <>
-          <SourceFinderCard
-            country={market?.country}
-            language={market?.language}
-            title={ctx.localized?.meta?.title}
+          <EeatSourcesCard
             sources={ctx.sources?.eeat ?? []}
+            selected={eeatSelected}
+            canManage={canManage}
+            onToggle={(url) =>
+              setEeatSelected((cur) =>
+                cur.includes(url) ? cur.filter((x) => x !== url) : [...cur, url],
+              )
+            }
           />
           <ImprovementPanel
             improve={ctx.improve}

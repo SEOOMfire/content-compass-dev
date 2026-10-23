@@ -313,16 +313,20 @@ export interface ImprovementResult {
   warnings: string[];
 }
 
-/** Eine gefundene Quelle (Name + URL). */
+/** Eine gefundene Quelle (Name + URL + Begründung). */
 export interface SourceSuggestion {
   name: string;
   url: string;
+  /** Warum diese Quelle ausgewählt wurde. */
+  reason: string;
 }
 
 /** Ergebnis von Schritt 9 (Quellenrecherche). */
 export interface SourcesResult {
-  /** Gefundene E-E-A-T-Quellen für den ganzen Artikel (nur Anzeige). */
+  /** Gefundene E-E-A-T-Quellen für den ganzen Artikel. */
   eeat: SourceSuggestion[];
+  /** Vom Nutzer ausgewählte E-E-A-T-Quell-URLs. */
+  selected: string[];
   notes: string[];
   warnings: string[];
 }

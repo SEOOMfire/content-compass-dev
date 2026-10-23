@@ -28,24 +28,28 @@ const SOURCE_SYSTEM =
   "Du suchst mit Web-Suche eine konkrete, seriöse Quelle. Antworte NUR mit „Name der Quelle – URL“ (max. 1 Zeile). Ohne Treffer antworte „keine“.";
 
 const EEAT_SYSTEM =
-  "Du suchst mit Web-Suche anerkannte, vertrauenswürdige Quellen für E-E-A-T (Experience, Expertise, Authoritativeness, Trustworthiness). Antworte NUR als Liste, je Zeile „Name der Quelle – URL“.";
+  "Du suchst mit Web-Suche anerkannte, vertrauenswürdige Quellen für E-E-A-T (Experience, Expertise, Authoritativeness, Trustworthiness). Antworte NUR als Liste, je Zeile im Format „Name der Quelle | URL | Grund (1 kurzer Satz, warum die Quelle geeignet ist)“. Ohne Treffer antworte „keine“.";
 
 function parseEeatSources(
   text: string,
   citations: { url: string; title: string | null }[],
 ): SourceSuggestion[] {
-  if (citations.length) {
-    return citations.map((c) => ({ name: c.title ?? c.url, url: c.url }));
-  }
   const out: SourceSuggestion[] = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line || /^(keine|none)$/i.test(line)) continue;
-    const sep = line.lastIndexOf(" – ");
-    if (sep > 0) {
-      const name = line.slice(0, sep).trim();
-      const url = line.slice(sep + 3).trim();
-      if (url) out.push({ name, url });
+    const clean = line.replace(/^[-*••]\s*/, "").trim();
+    const parts = clean.split(" | ");
+    if (parts.length >= 2) {
+      const name = parts[0]!.trim();
+      const url = parts[1]!.trim();
+      const reason = parts.slice(2).join(" | ").trim();
+      if (/^https?:\/\//i.test(url)) out.push({ name, url, reason });
+    }
+  }
+  if (out.length === 0 && citations.length) {
+    for (const c of citations) {
+      out.push({ name: c.title ?? c.url, url: c.url, reason: "" });
     }
   }
   return out;
@@ -88,7 +92,7 @@ export async function researchSources(args: SourcesArgs): Promise<SourcesOutcome
   }
 
   const title = args.ctx.localized?.meta?.title ?? "";
-  const eeatUser = `Finde seriöse, anerkannte Quellen aus ${country} (${language}) zum Artikel „${title}“ – Behörden, Fachverbände, wissenschaftliche Institutionen, renommierte Fachportale.`;
+  const eeatUser = `Finde seriöse, anerkannte Quellen aus ${country} (${language}) zum Artikel „${title}“ – Behörden, Fachverbände, wissenschaftliche Institutionen, renommierte Fachportale. Nenne je Quelle eine kurze Begründung, warum sie für E-E-A-T geeignet ist.`;
   let eeat: SourceSuggestion[] = [];
   try {
     const r = await args.webSearch(EEAT_SYSTEM, eeatUser);
@@ -107,5 +111,5 @@ export async function researchSources(args: SourcesArgs): Promise<SourcesOutcome
     );
   }
 
-  return { sources: { eeat, notes, warnings }, overrides, stats };
+  return { sources: { eeat, selected: [], notes, warnings }, overrides, stats };
 }

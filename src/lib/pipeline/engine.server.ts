@@ -10,6 +10,8 @@ import {
   type LocalizedBlock,
   type LocalizedDoc,
   type SemanticLinkingResult,
+  type SourceSuggestion,
+  type SourcesResult,
   type StepKey,
 } from "./types";
 import { extractSource, fetchHtml } from "./extract.server";
@@ -686,6 +688,7 @@ export interface ApplyAllChangesInput {
   semanticBlockIds: string[];
   improvementProposalIds: string[];
   userTexts: Record<string, string>;
+  selectedEeat: string[];
 }
 
 /**
@@ -757,15 +760,29 @@ export async function applyAllChangesStep(
     finalBlocks = applyLinkingPatch(improvedLocalized, linking);
   }
 
-  const exportMarkdown = renderMarkdown(finalBlocks, improvedLocalized.meta, {
+  let exportMarkdown = renderMarkdown(finalBlocks, improvedLocalized.meta, {
     closing_note: market.closing_note,
   });
+
+  // Ausgewählte E-E-A-T-Quellen ans Ende des Exports anhängen (reversibel).
+  let sources: SourcesResult | undefined = context.sources;
+  if (sources) {
+    sources = { ...sources, selected: changes.selectedEeat };
+    const selectedSources = changes.selectedEeat
+      .map((url) => sources!.eeat.find((s) => s.url === url))
+      .filter((s): s is SourceSuggestion => Boolean(s));
+    if (selectedSources.length) {
+      const lines = selectedSources.map((s) => `- [${s.name}](${s.url})`);
+      exportMarkdown = `${exportMarkdown.trimEnd()}\n\n## Quellen\n${lines.join("\n")}\n`;
+    }
+  }
 
   const nextContext: JobContext = {
     ...context,
     ...(linking ? { linking } : {}),
     ...(semanticLinking ? { semanticLinking } : {}),
     ...(improve ? { improve } : {}),
+    ...(sources ? { sources } : {}),
     exportMarkdown,
   };
 
