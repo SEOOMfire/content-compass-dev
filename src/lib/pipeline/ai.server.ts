@@ -201,7 +201,8 @@ export interface WebSearchResult {
 export const WEB_SEARCH_MODEL = "gpt-4.1";
 
 /**
- * OpenAI Chat Completions mit integriertem web_search-Tool.
+ * OpenAI **Responses-API** mit integriertem web_search-Tool.
+ * (Die Chat-Completions-API akzeptiert `web_search` nicht als tools-Typ.)
  * Liefert die Antwort und die Quellen-Zitationen (url_citation-Annotationen).
  */
 export async function webSearchCompletion(
@@ -211,42 +212,46 @@ export async function webSearchCompletion(
   const id = modelId(WEB_SEARCH_MODEL);
   const params: Record<string, unknown> = {
     model: id,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
-    ],
+    instructions: system,
+    input: user,
     tools: [{ type: "web_search" }],
     temperature: 0.2,
+    max_output_tokens: 2000,
   };
-  if (usesCompletionTokens(id)) {
-    params["max_completion_tokens"] = 2000;
-  } else {
-    params["max_tokens"] = 2000;
-  }
-  const res = await fetch(`${BASE_URL}/chat/completions`, {
+  const res = await fetch(`${BASE_URL}/responses`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${apiKey()}` },
     body: JSON.stringify(params),
   });
   if (!res.ok) throw await gatewayError(res);
   const json = (await res.json()) as {
-    choices?: {
-      message?: {
-        content?: string;
+    output?: {
+      type?: string;
+      content?: {
+        type?: string;
+        text?: string;
         annotations?: { type?: string; url?: string; title?: string }[];
-      };
+      }[];
     }[];
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    usage?: { input_tokens?: number; output_tokens?: number };
   };
-  const message = json.choices?.[0]?.message;
-  const citations = (message?.annotations ?? [])
-    .filter((a) => a?.type === "url_citation" && typeof a?.url === "string")
-    .map((a) => ({ url: a.url as string, title: typeof a.title === "string" ? a.title : null }));
+  let text = "";
+  let citations: { url: string; title: string | null }[] = [];
+  for (const item of json.output ?? []) {
+    if (item.type !== "message") continue;
+    for (const c of item.content ?? []) {
+      if (c.type !== "output_text") continue;
+      text = c.text ?? "";
+      citations = (c.annotations ?? [])
+        .filter((a) => a?.type === "url_citation" && typeof a?.url === "string")
+        .map((a) => ({ url: a.url as string, title: typeof a.title === "string" ? a.title : null }));
+    }
+  }
   return {
-    text: message?.content ?? "",
+    text,
     citations,
     model: id,
-    tokensIn: json.usage?.prompt_tokens ?? 0,
-    tokensOut: json.usage?.completion_tokens ?? 0,
+    tokensIn: json.usage?.input_tokens ?? 0,
+    tokensOut: json.usage?.output_tokens ?? 0,
   };
 }
