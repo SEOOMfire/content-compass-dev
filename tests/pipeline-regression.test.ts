@@ -746,7 +746,7 @@ describe("review", () => {
 // ---------------------------------------------------------------------------
 
 describe("pipeline", () => {
-  test("genau 9 Schritte in fester Reihenfolge", () => {
+  test("genau 8 Schritte in fester Reihenfolge", () => {
     expect(PIPELINE.map((s) => s.key)).toEqual([
       "extract",
       "scan",
@@ -755,7 +755,6 @@ describe("pipeline", () => {
       "links",
       "semantic_links",
       "check",
-      "improve",
       "sources",
     ]);
     expect(PIPELINE.filter((s) => s.promptKey).map((s) => s.promptKey)).toEqual([
@@ -765,7 +764,6 @@ describe("pipeline", () => {
       "link_integration",
       "semantic_link_keywords",
       "localization_check",
-      "improvement_proposals",
     ]);
   });
 
@@ -822,28 +820,7 @@ describe("pipeline", () => {
         exportMarkdown: "x",
       }),
     ).toBeNull();
-    // Schritt 8 baut auf Schritt 7 auf – ohne Check blockiert er.
-    expect(dependencyBlocker("improve", { source, findings: [], localized })).toContain("Schritt 4");
-    expect(
-      dependencyBlocker("improve", {
-        source,
-        findings: [],
-        localized,
-        review: { issues: [], applied: [], warnings: [] },
-        exportMarkdown: "x",
-      }),
-    ).toContain("Schritt 7");
-    expect(
-      dependencyBlocker("improve", {
-        source,
-        findings: [],
-        localized,
-        review: { issues: [], applied: [], warnings: [] },
-        exportMarkdown: "x",
-        check: { markdown: "…", blocking: 0, hints: 0, sourceFetched: true },
-      }),
-    ).toBeNull();
-    // Schritt 9 baut auf Schritt 8 auf – ohne Improve blockiert er.
+    // Schritt 8 (EEAT-Quellen) baut nur auf Schritt 4 auf.
     expect(dependencyBlocker("sources", { source, localized })).toContain("Schritt 4");
     expect(
       dependencyBlocker("sources", {
@@ -851,15 +828,6 @@ describe("pipeline", () => {
         localized,
         review: { issues: [], applied: [], warnings: [] },
         exportMarkdown: "x",
-      }),
-    ).toContain("Schritt 8");
-    expect(
-      dependencyBlocker("sources", {
-        source,
-        localized,
-        review: { issues: [], applied: [], warnings: [] },
-        exportMarkdown: "x",
-        improve: { proposals: [], applied: [], overrides: {}, notes: [], warnings: [] },
       }),
     ).toBeNull();
   });

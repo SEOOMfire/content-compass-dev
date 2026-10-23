@@ -157,8 +157,6 @@ export const applyAllChangesFn = createServerFn({ method: "POST" })
         jobId: z.string().uuid(),
         linkingInserted: z.boolean(),
         semanticBlockIds: z.array(z.string()),
-        improvementProposalIds: z.array(z.string()),
-        userTexts: z.record(z.string()),
         selectedEeat: z.array(z.string()),
         manualEeat: z.array(
           z.object({ name: z.string(), url: z.string(), reason: z.string() }),
@@ -173,30 +171,9 @@ export const applyAllChangesFn = createServerFn({ method: "POST" })
     const res = await applyAllChangesStep(data.jobId, {
       linkingInserted: data.linkingInserted,
       semanticBlockIds: data.semanticBlockIds,
-      improvementProposalIds: data.improvementProposalIds,
-      userTexts: data.userTexts,
       selectedEeat: data.selectedEeat,
       manualEeat: data.manualEeat,
     });
-    return res;
-  });
-
-export const applyImprovementsFn = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
-  .inputValidator((d: unknown) =>
-    z
-      .object({
-        jobId: z.string().uuid(),
-        proposalIds: z.array(z.string()),
-        userTexts: z.record(z.string()).optional(),
-      })
-      .parse(d),
-  )
-  .handler(async ({ data, context }) => {
-    const workspaceId = await getJobWorkspace(data.jobId);
-    await assertWorkspaceRole(context.userId, workspaceId, MANAGER_ROLES);
-    const { applyImprovementsStep } = await import("@/lib/pipeline/engine.server");
-    const res = await applyImprovementsStep(data.jobId, data.proposalIds, data.userTexts ?? {});
     return res;
   });
 

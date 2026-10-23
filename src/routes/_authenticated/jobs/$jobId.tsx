@@ -20,7 +20,6 @@ import {
   PIPELINE,
   type Block,
   type Finding,
-  type ImprovementResult,
   type JobContext,
   type LinkingResult,
   type LocalizedBlock,
@@ -290,7 +289,7 @@ function EeatSourcesCard({
       <CardContent className="space-y-2 pt-0">
         {all.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            Noch keine Quellen gefunden – Schritt 9 ausführen oder unten manuell ergänzen.
+            Noch keine Quellen gefunden – Schritt 8 ausführen oder unten manuell ergänzen.
           </p>
         ) : (
           all.map((s, i) => (
@@ -361,9 +360,7 @@ function SemanticLinkPanel({
   canManage,
   selected,
   linkingInserted,
-  onToggle,
-  onSelectAll,
-  onSelectNone,
+  onSetSelected,
   onToggleStep5,
 }: {
   semanticLinking: SemanticLinkingResult;
@@ -374,31 +371,62 @@ function SemanticLinkPanel({
   canManage: boolean;
   selected: string[];
   linkingInserted: boolean;
-  onToggle: (id: string) => void;
-  onSelectAll: () => void;
-  onSelectNone: () => void;
+  onSetSelected: (ids: string[]) => void;
   onToggleStep5: () => void;
 }) {
-  const eligible = semanticLinking.keywords.filter((k) => k.eligible && k.chosen);
-  const below = semanticLinking.keywords.filter((k) => !k.eligible && k.chosen);
-  const selectable = [...eligible, ...below];
+  const selectable = semanticLinking.keywords.filter((k) => k.chosen);
   const insertedIds = new Set(semanticLinking.inserted.map((i) => i.block_id));
   const blockById = new Map((blocks ?? []).map((b) => [b.id, b]));
   const sourceById = new Map((sourceBlocks ?? []).map((b) => [b.id, b]));
 
-  // Wie oft dieselbe Ziel-URL vorgeschlagen wird (über alle auswählbaren Vorschläge).
-  const urlCounts = new Map<string, number>();
+  // Je Ziel-URL eine Gruppe (dedupliziert), sortiert nach bester Wahrscheinlichkeit.
+  const byUrl = new Map<string, SemanticKeyword[]>();
   for (const k of selectable) {
-    urlCounts.set(k.chosen!.url, (urlCounts.get(k.chosen!.url) ?? 0) + 1);
+    const arr = byUrl.get(k.chosen!.url) ?? [];
+    arr.push(k);
+    byUrl.set(k.chosen!.url, arr);
   }
-  // Wie oft dieselbe Ziel-URL aktuell ausgewählt ist (Duplikat-Warnung).
+  const groups = [...byUrl.values()]
+    .map((kws) => ({
+      url: kws[0]!.chosen!.url,
+      title: kws[0]!.chosen!.title,
+      keywords: kws,
+    }))
+    .sort(
+      (a, b) =>
+        (b.keywords[0]!.chosen!.probability ?? 0) - (a.keywords[0]!.chosen!.probability ?? 0),
+    );
+  const highGroups = groups.filter((g) => g.keywords.some((k) => k.eligible));
+  const mediumGroups = groups.filter((g) => !g.keywords.some((k) => k.eligible));
+
   const selectedUrlCounts = new Map<string, number>();
   for (const id of selected) {
     const k = selectable.find((x) => x.block_id === id);
     if (k?.chosen)
       selectedUrlCounts.set(k.chosen.url, (selectedUrlCounts.get(k.chosen.url) ?? 0) + 1);
   }
-  const hasDuplicateSelection = [...selectedUrlCounts.values()].some((n) => n > 1);
+
+  function toggle(id: string) {
+    const k = selectable.find((x) => x.block_id === id);
+    if (!k?.chosen) return;
+    if (selected.includes(id)) {
+      onSetSelected(selected.filter((x) => x !== id));
+      return;
+    }
+    if ((selectedUrlCounts.get(k.chosen.url) ?? 0) >= 2) {
+      toast.error("Max. 2 Links pro Zielquelle");
+      return;
+    }
+    onSetSelected([...selected, id]);
+  }
+
+  function selectAll() {
+    const ids: string[] = [];
+    for (const g of groups) {
+      for (const k of g.keywords.slice(0, 2)) ids.push(k.block_id);
+    }
+    onSetSelected(ids);
+  }
 
   function row(k: SemanticKeyword) {
     const src = blockById.get(k.block_id);
@@ -406,61 +434,67 @@ function SemanticLinkPanel({
     const de = sourceById.get(k.block_id);
     const deText = de ? blockPlainText(de) : "";
     const inText = insertedIds.has(k.block_id);
-    const url = k.chosen!.url;
-    const dupCount = urlCounts.get(url) ?? 0;
-    const dupSelected = selectedUrlCounts.get(url) ?? 0;
+    const atLimit =
+      (selectedUrlCounts.get(k.chosen!.url) ?? 0) >= 2 && !selected.includes(k.block_id);
     return (
-      <div key={k.block_id} className="rounded-md border border-border p-2">
-        <label className="flex cursor-pointer items-start gap-2">
-          <input
-            type="checkbox"
-            className="mt-0.5"
-            disabled={!canManage}
-            checked={selected.includes(k.block_id)}
-            onChange={() => onToggle(k.block_id)}
-          />
-          <span className="min-w-0 flex-1">
-            <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-              <strong>{k.keyword}</strong>
-              <span className="text-muted-foreground">→</span>
-              <a
-                href={url}
-                target="_blank"
-                rel="noreferrer"
-                onClick={(e) => e.stopPropagation()}
-                className="font-medium text-primary underline-offset-2 hover:underline"
-              >
-                {k.chosen!.title || url} ↗
-              </a>
-              {dupCount > 1 && (
-                <span className="tabular-nums text-muted-foreground">
-                  · {dupCount}× vorgeschlagen
-                </span>
-              )}
-              {dupSelected > 1 && (
-                <span className="rounded bg-amber-200/70 px-1 text-amber-900">
-                  {dupSelected}× ausgewählt – nur 1× wird übernommen
-                </span>
-              )}
-              {inText && (
-                <Badge variant="outline" className="text-muted-foreground">
-                  ✓ im Text
-                </Badge>
-              )}
-            </span>
-            {srcText && (
-              <span className="mt-1 block border-l-2 border-border pl-2 text-muted-foreground">
-                „<Highlight text={srcText} keyword={k.keyword} />“
-              </span>
-            )}
-            {deText && (
-              <span className="mt-1 block pl-2 text-muted-foreground">
-                <span className="font-medium">DE:</span>{" "}
-                {deText.length > 280 ? `${deText.slice(0, 280)}…` : deText}
-              </span>
+      <label
+        key={k.block_id}
+        className="flex cursor-pointer items-start gap-2 rounded-md border border-border p-2"
+      >
+        <input
+          type="checkbox"
+          className="mt-0.5"
+          disabled={!canManage || atLimit}
+          checked={selected.includes(k.block_id)}
+          onChange={() => toggle(k.block_id)}
+        />
+        <span className="min-w-0 flex-1">
+          <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+            <strong>{k.keyword}</strong>
+            <span className="tabular-nums text-muted-foreground">· {k.block_id}</span>
+            {inText && (
+              <Badge variant="outline" className="text-muted-foreground">
+                ✓ im Text
+              </Badge>
             )}
           </span>
-        </label>
+          {srcText && (
+            <span className="mt-1 block border-l-2 border-border pl-2 text-muted-foreground">
+              „<Highlight text={srcText} keyword={k.keyword} />“
+            </span>
+          )}
+          {deText && (
+            <span className="mt-1 block pl-2 text-muted-foreground">
+              <span className="font-medium">DE:</span>{" "}
+              {deText.length > 280 ? `${deText.slice(0, 280)}…` : deText}
+            </span>
+          )}
+        </span>
+      </label>
+    );
+  }
+
+  function renderGroup(g: { url: string; title: string | null; keywords: SemanticKeyword[] }) {
+    const count = selectedUrlCounts.get(g.url) ?? 0;
+    return (
+      <div key={g.url} className="rounded-md border border-border p-2">
+        <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+          <a
+            href={g.url}
+            target="_blank"
+            rel="noreferrer"
+            className="font-medium text-primary underline-offset-2 hover:underline"
+          >
+            {g.title || g.url} ↗
+          </a>
+          {g.keywords.length > 1 && (
+            <span className="tabular-nums text-muted-foreground">
+              · {g.keywords.length}× vorgeschlagen
+            </span>
+          )}
+          <span className="tabular-nums text-muted-foreground">· {count}/2 ausgewählt</span>
+        </div>
+        <div className="mt-2 space-y-2">{g.keywords.map(row)}</div>
       </div>
     );
   }
@@ -479,15 +513,15 @@ function SemanticLinkPanel({
             {pending > 0 ? `${pending} Linkvorschläge prüfen` : "Linkauswahl"}
           </CardTitle>
           <p className="text-xs text-muted-foreground">
-            Links an-/abwählbar – werden mit „Alle Änderungen übernehmen“ angewendet.
+            Je Zielquelle max. 2 Stellen auswählbar – angewendet mit „Alle Änderungen übernehmen“.
           </p>
         </div>
         {hasSelectable && canManage && (
           <div className="flex shrink-0 gap-2">
-            <Button size="sm" variant="outline" onClick={onSelectAll}>
+            <Button size="sm" variant="outline" onClick={selectAll}>
               Alle auswählen
             </Button>
-            <Button size="sm" variant="outline" onClick={onSelectNone}>
+            <Button size="sm" variant="outline" onClick={() => onSetSelected([])}>
               Keine
             </Button>
           </div>
@@ -547,16 +581,16 @@ function SemanticLinkPanel({
           </p>
         ) : (
           <>
-            {eligible.length > 0 && (
+            {highGroups.length > 0 && (
               <div className="space-y-2">
                 <p className="text-sm font-medium">Links mit hoher Wahrscheinlichkeit</p>
-                {eligible.map(row)}
+                {highGroups.map(renderGroup)}
               </div>
             )}
-            {below.length > 0 && (
+            {mediumGroups.length > 0 && (
               <div className="space-y-2">
                 <p className="text-sm font-medium">Links mit mittlerer Wahrscheinlichkeit</p>
-                {below.map(row)}
+                {mediumGroups.map(renderGroup)}
               </div>
             )}
           </>
@@ -569,113 +603,6 @@ function SemanticLinkPanel({
             ))}
           </ul>
         )}
-        {hasDuplicateSelection && (
-          <p className="text-sm text-amber-700">
-            Achtung: mehrere Vorschläge zeigen auf dieselbe URL – nur der erste wird übernommen.
-          </p>
-        )}
-      </CardContent>
-    </Card>
-  );
-}
-
-function ImprovementPanel({
-  improve,
-  canManage,
-  selected,
-  userTexts,
-  onToggle,
-  onSelectAll,
-  onSelectNone,
-  onUserText,
-}: {
-  improve: ImprovementResult;
-  canManage: boolean;
-  selected: string[];
-  userTexts: Record<string, string>;
-  onToggle: (id: string) => void;
-  onSelectAll: () => void;
-  onSelectNone: () => void;
-  onUserText: (id: string, value: string) => void;
-}) {
-  const appliedIds = new Set(improve.applied);
-  const sourceProposals = improve.proposals.filter((p) => p.kind === "quelle");
-
-  if (!sourceProposals.length) {
-    return (
-      <Card className="border-border bg-surface">
-        <CardHeader>
-          <CardTitle className="text-base">Quellen im Text</CardTitle>
-        </CardHeader>
-        <CardContent className="pt-0">
-          <p className="text-sm text-muted-foreground">Keine Quellen-Vorschläge.</p>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  return (
-    <Card className="border-border bg-surface">
-      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
-        <CardTitle className="text-base">Quellen im Text</CardTitle>
-        {canManage && (
-          <div className="flex shrink-0 gap-2">
-            <Button size="sm" variant="outline" onClick={() => onSelectAll()}>
-              Alle auswählen
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => onSelectNone()}>
-              Keine
-            </Button>
-          </div>
-        )}
-      </CardHeader>
-      <CardContent className="space-y-2">
-        {sourceProposals.map((p) => {
-          const applied = appliedIds.has(p.id);
-          return (
-            <div key={p.id} className="rounded-md border border-border p-2">
-              <label className="flex cursor-pointer items-start gap-2">
-                <input
-                  type="checkbox"
-                  className="mt-0.5"
-                  disabled={!canManage}
-                  checked={selected.includes(p.id)}
-                  onChange={() => onToggle(p.id)}
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-                    <Badge variant="secondary">Quelle</Badge>
-                    <strong>{p.title}</strong>
-                    {p.block_id && (
-                      <span className="tabular-nums text-muted-foreground">· {p.block_id}</span>
-                    )}
-                    {applied && (
-                      <Badge variant="outline" className="text-muted-foreground">
-                        ✓ übernommen
-                      </Badge>
-                    )}
-                  </span>
-                  <span className="mt-1 block text-muted-foreground">{p.problem}</span>
-                  {p.suggestion && (
-                    <span className="mt-1 block text-muted-foreground">
-                      Empfehlung: {p.suggestion}
-                    </span>
-                  )}
-                </span>
-              </label>
-              {p.patch == null && (
-                <input
-                  type="text"
-                  placeholder="Quelle eintragen (URL oder Text) – wird als „Quelle: …“ ans Blockende angehängt"
-                  className="mt-2 w-full rounded border border-border bg-background px-2 py-1 text-xs"
-                  value={userTexts[p.id] ?? ""}
-                  disabled={!canManage}
-                  onChange={(e) => onUserText(p.id, e.target.value)}
-                />
-              )}
-            </div>
-          );
-        })}
       </CardContent>
     </Card>
   );
@@ -693,8 +620,6 @@ function JobDetail() {
   // Pending Änderungen (werden mit „Alle Änderungen übernehmen“ angewendet).
   const [linkingInserted, setLinkingInserted] = useState(false);
   const [semanticSelected, setSemanticSelected] = useState<string[]>([]);
-  const [improveSelected, setImproveSelected] = useState<string[]>([]);
-  const [userTexts, setUserTexts] = useState<Record<string, string>>({});
   const [eeatSelected, setEeatSelected] = useState<string[]>([]);
   const [manualEeat, setManualEeat] = useState<SourceSuggestion[]>([]);
   const [applyingAll, setApplyingAll] = useState(false);
@@ -867,23 +792,6 @@ function JobDetail() {
     setLinkingInserted(ctx.linking?.inserted ?? false);
   }, [ctx.linking?.inserted]);
 
-  const impSig = [
-    (ctx.improve?.proposals ?? []).map((p) => p.id).join(","),
-    (ctx.improve?.applied ?? []).join(","),
-    Object.keys(ctx.improve?.overrides ?? {}).join(","),
-    ctx.improve ? "1" : "0",
-  ].join("|");
-  useEffect(() => {
-    if (!ctx.improve) {
-      setImproveSelected([]);
-      setUserTexts({});
-      return;
-    }
-    setImproveSelected(ctx.improve.applied ?? []);
-    setUserTexts(ctx.improve.overrides ?? {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [impSig]);
-
   const srcSig = [
     (ctx.sources?.eeat ?? []).map((s) => s.url).join(","),
     (ctx.sources?.selected ?? []).join(","),
@@ -902,16 +810,11 @@ function JobDetail() {
           jobId,
           linkingInserted,
           semanticBlockIds: semanticSelected,
-          improvementProposalIds: improveSelected,
-          userTexts,
           selectedEeat: eeatSelected,
           manualEeat,
         },
       });
-      if (res.ok)
-        toast.success(
-          `${res.inserted} Link(s), ${res.applied} Vorschlag/Vorschläge übernommen (${res.patched} Textänderungen)`,
-        );
+      if (res.ok) toast.success(`${res.inserted} Link(s) übernommen`);
       else toast.error(res.error ?? "Übernehmen fehlgeschlagen");
       setManualEeat([]);
       await refresh();
@@ -1043,18 +946,10 @@ function JobDetail() {
                     </p>
                   )}
 
-                  {def.key === "improve" && (
-                    <p className="text-muted-foreground">
-                      {output && Array.isArray(output["proposals"])
-                        ? `${(output["proposals"] as unknown[]).length} Vorschlag/Vorschläge – siehe Panel unten.`
-                        : "Siehe Panel unten."}
-                    </p>
-                  )}
-
                   {def.key === "sources" && (
                     <p className="text-muted-foreground">
                       {output && Array.isArray(output["eeat"])
-                        ? `E-E-A-T-Quellen: ${(output["eeat"] as unknown[]).length} · „Quelle“-Felder vorausgefüllt.`
+                        ? `EEAT-Quellen: ${(output["eeat"] as unknown[]).length} gefunden.`
                         : "Quellen-Recherche abgeschlossen."}
                     </p>
                   )}
@@ -1075,7 +970,6 @@ function JobDetail() {
                       def.key !== "review" &&
                       def.key !== "links" &&
                       def.key !== "semantic_links" &&
-                      def.key !== "improve" &&
                       def.key !== "sources"
                     }
                   >
@@ -1104,58 +998,26 @@ function JobDetail() {
             canManage={canManage}
             selected={semanticSelected}
             linkingInserted={linkingInserted}
-            onToggle={(id) =>
-              setSemanticSelected((cur) =>
-                cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
-              )
-            }
-            onSelectAll={() =>
-              setSemanticSelected(
-                ctx.semanticLinking!.keywords.filter((k) => k.chosen).map((k) => k.block_id),
-              )
-            }
-            onSelectNone={() => setSemanticSelected([])}
+            onSetSelected={setSemanticSelected}
             onToggleStep5={() => setLinkingInserted((cur) => !cur)}
           />
         </div>
       )}
 
-      {ctx.improve && (
-        <>
-          <EeatSourcesCard
-            sources={ctx.sources?.eeat ?? []}
-            manual={manualEeat}
-            selected={eeatSelected}
-            canManage={canManage}
-            onToggle={(url) =>
-              setEeatSelected((cur) =>
-                cur.includes(url) ? cur.filter((x) => x !== url) : [...cur, url],
-              )
-            }
-            onAddManual={(n, u) =>
-              setManualEeat((cur) => [...cur, { name: n, url: u, reason: "" }])
-            }
-          />
-          <ImprovementPanel
-            improve={ctx.improve}
-            canManage={canManage}
-            selected={improveSelected}
-            userTexts={userTexts}
-            onToggle={(id) =>
-              setImproveSelected((cur) =>
-                cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
-              )
-            }
-            onSelectAll={() =>
-              setImproveSelected(
-                ctx.improve!.proposals.filter((p) => p.kind === "quelle").map((p) => p.id),
-              )
-            }
-            onSelectNone={() => setImproveSelected([])}
-            onUserText={(id, value) => setUserTexts((cur) => ({ ...cur, [id]: value }))}
-          />
-        </>
-      )}
+      <EeatSourcesCard
+        sources={ctx.sources?.eeat ?? []}
+        manual={manualEeat}
+        selected={eeatSelected}
+        canManage={canManage}
+        onToggle={(url) =>
+          setEeatSelected((cur) =>
+            cur.includes(url) ? cur.filter((x) => x !== url) : [...cur, url],
+          )
+        }
+        onAddManual={(n, u) =>
+          setManualEeat((cur) => [...cur, { name: n, url: u, reason: "" }])
+        }
+      />
 
       {exportMd && (
         <Card className="border-border bg-surface">
@@ -1196,7 +1058,7 @@ function JobDetail() {
         </Card>
       )}
 
-      {canManage && (ctx.semanticLinking || ctx.improve || ctx.linking) && (
+      {canManage && (ctx.semanticLinking || ctx.linking) && (
         <Card className="border-2 border-primary/40 bg-surface">
           <CardHeader className="flex flex-row items-center justify-between space-y-0">
             <div>

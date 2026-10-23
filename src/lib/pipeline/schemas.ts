@@ -91,28 +91,6 @@ export const SemanticKeywordsOutputSchema = z.object({
   keywords: z.array(SemanticKeywordInputSchema).default([]),
 });
 
-/** Schritt 8 · improvement_proposals: vollständig korrigierter Blockinhalt (optional). */
-export const ImprovementPatchSchema = z.object({
-  text: TextSchema.optional(),
-  items: z.array(ListItemInputSchema).optional(),
-  rows: z.array(z.array(TextSchema)).optional(),
-});
-
-/** Schritt 8 · improvement_proposals */
-export const ImprovementProposalInputSchema = z.object({
-  kind: z.enum(["verbesserung", "quelle"]).catch("verbesserung"),
-  block_id: z.string().nullable().optional(),
-  title: z.string().min(1),
-  problem: z.string().min(1),
-  suggestion: z.string().default(""),
-  patch: ImprovementPatchSchema.nullable().optional(),
-});
-
-/** Schritt 8 · improvement_proposals */
-export const ImprovementOutputSchema = z.object({
-  proposals: z.array(ImprovementProposalInputSchema).default([]),
-});
-
 export class StepSchemaError extends Error {}
 
 /** Validiert eine Schrittausgabe. Verstoß = Fehler, kein stiller Fallback. */

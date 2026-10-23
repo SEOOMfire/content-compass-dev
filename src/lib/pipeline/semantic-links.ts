@@ -26,6 +26,12 @@ import {
  * damit der Ablauf ohne Netzwerk testbar ist.
  */
 
+/** Max. Ankertext-Länge in Wörtern (potenziell zu verlinkende Wörter). */
+export const MAX_KEYWORD_WORDS = 3;
+
+/** Max. Einfügungen derselben Ziel-URL im Text. */
+export const MAX_LINKS_PER_URL = 2;
+
 export interface MatchPage {
   url: string;
   title: string | null;
@@ -292,6 +298,7 @@ export async function semanticLinkDocument(args: SemanticLinkArgs): Promise<Sema
       if (!block || seenBlocks.has(block.id)) continue;
       const kw = normalizeKeyword(k.keyword);
       if (!kw) continue;
+      if (kw.split(/\s+/).length > MAX_KEYWORD_WORDS) continue;
       const kwKey = kw.toLowerCase();
       if (seenKeywords.has(kwKey)) continue;
       if (!blockPlainText(block).replace(/\s+/g, " ").toLowerCase().includes(kwKey)) continue;
@@ -417,17 +424,18 @@ export function applySemanticLinks(
   const blocks = applyLinkingPatch(localized, linking);
   const selected = new Set(selectedBlockIds);
   const inserted: { block_id: string; keyword: string; url: string }[] = [];
-  const usedUrls = new Set<string>();
+  const usedUrls = new Map<string, number>();
   const patchedByBlock = new Map<string, LocalizedBlock>();
   for (const kw of semanticLinking.keywords) {
     if (!kw.chosen) continue;
     if (!selected.has(kw.block_id)) continue;
-    if (usedUrls.has(kw.chosen.url)) continue;
+    const used = usedUrls.get(kw.chosen.url) ?? 0;
+    if (used >= MAX_LINKS_PER_URL) continue;
     const base = blocks.find((b) => b.id === kw.block_id);
     if (!base) continue;
     const patched = insertLinkIntoBlock(base, kw.keyword, kw.chosen.url);
     if (!patched) continue;
-    usedUrls.add(kw.chosen.url);
+    usedUrls.set(kw.chosen.url, used + 1);
     patchedByBlock.set(kw.block_id, patched);
     inserted.push({ block_id: kw.block_id, keyword: kw.keyword, url: kw.chosen.url });
   }

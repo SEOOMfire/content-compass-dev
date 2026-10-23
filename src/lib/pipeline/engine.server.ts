@@ -4,11 +4,9 @@ import {
   STEP_BY_KEY,
   STEP_CONTEXT_KEYS,
   type Block,
-  type ImprovementResult,
   type JobContext,
   type LinkingResult,
   type LocalizedBlock,
-  type LocalizedDoc,
   type SemanticLinkingResult,
   type SourceSuggestion,
   type SourcesResult,
@@ -28,7 +26,7 @@ import {
   type PromptTemplateRow,
 } from "./ai.server";
 import { dependencyBlocker } from "./deps";
-import { isGermanTarget, marketPromptProfile, toMarketProfile, type MarketProfile } from "./market";
+import { marketPromptProfile, toMarketProfile, type MarketProfile } from "./market";
 import { normalizeFindings } from "./scan";
 import {
   blocksForPrompt,
@@ -39,9 +37,7 @@ import {
 } from "./localize";
 import { reviewDocument } from "./review";
 import { checkLocalization } from "./check";
-import { applyImprovements, proposeImprovements } from "./improve";
 import { researchSources } from "./sources";
-import { validateBlockPatch, type BlockContent } from "./validate";
 
 export { dependencyBlocker };
 
@@ -384,48 +380,20 @@ export async function runStep(
       };
     }
 
-    case "improve": {
-      requireSource(ctx);
-      if (!ctx.localized) throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
-      if (typeof ctx.exportMarkdown !== "string")
-        throw new Error("Schritt 4 (Prüfen & Export) muss zuerst laufen.");
-      const tpl = await loadTemplate("improvement_proposals");
-      const res = await proposeImprovements({
-        sourceUrl: job.source_url,
-        market,
-        ctx,
-        call: promptCall(tpl),
-      });
-      return {
-        output: res.improve,
-        context: { improve: res.improve },
-        ...(res.stats.model ? { model: res.stats.model } : {}),
-        ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
-        tokensIn: res.stats.tokensIn,
-        tokensOut: res.stats.tokensOut,
-      };
-    }
-
     case "sources": {
       requireSource(ctx);
       if (!ctx.localized) throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
       if (typeof ctx.exportMarkdown !== "string")
         throw new Error("Schritt 4 (Prüfen & Export) muss zuerst laufen.");
-      if (!ctx.improve)
-        throw new Error("Schritt 8 (Verbesserungen & Quellen) muss zuerst laufen.");
       const res = await researchSources({
         sourceUrl: job.source_url,
         market,
         ctx,
         webSearch: (system, user) => webSearchCompletion(system, user),
       });
-      const improve: ImprovementResult = {
-        ...ctx.improve,
-        overrides: { ...ctx.improve.overrides, ...res.overrides },
-      };
       return {
-        output: { ...res.sources, overrides: res.overrides },
-        context: { sources: res.sources, improve },
+        output: res.sources,
+        context: { sources: res.sources },
         ...(res.stats.model ? { model: res.stats.model } : {}),
         ...(res.stats.promptSnapshot ? { promptSnapshot: res.stats.promptSnapshot } : {}),
         tokensIn: res.stats.tokensIn,
@@ -686,23 +654,20 @@ export async function setLinkingInsertedStep(
 export interface ApplyAllChangesInput {
   linkingInserted: boolean;
   semanticBlockIds: string[];
-  improvementProposalIds: string[];
-  userTexts: Record<string, string>;
   selectedEeat: string[];
   manualEeat: SourceSuggestion[];
 }
 
 /**
  * Wendet ALLE ausstehenden Änderungen in einem Durchgang an (reversibel):
- * Schritt-5-Link an/ab, semantische Links (Auswahl), Verbesserungen/Quellen
- * (Auswahl + Nutzertexte). Die Basis (`localized.blocks`) bleibt unverändert;
- * der Export wird deterministisch aus Verbesserungen → Schritt-5-Link →
- * semantische Links gerendert.
+ * Schritt-5-Link an/ab, semantische Links (Auswahl), EEAT-Quellen (Auswahl).
+ * Die Basis (`localized.blocks`) bleibt unverändert; der Export wird
+ * deterministisch aus Schritt-5-Link → semantische Links gerendert.
  */
 export async function applyAllChangesStep(
   jobId: string,
   changes: ApplyAllChangesInput,
-): Promise<{ ok: boolean; inserted: number; applied: number; patched: number; error?: string }> {
+): Promise<{ ok: boolean; inserted: number; error?: string }> {
   const { data: job, error } = await supabaseAdmin
     .from("jobs")
     .select("*, markets(*)")
@@ -715,33 +680,9 @@ export async function applyAllChangesStep(
   if (!context.localized?.blocks?.length)
     throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
 
-  const sameLanguage = isGermanTarget(market);
   const linking: LinkingResult | undefined = context.linking
     ? { ...context.linking, inserted: changes.linkingInserted }
     : context.linking;
-
-  // Verbesserungen als Overlay (Basis bleibt unverändert).
-  let improve: ImprovementResult | undefined = context.improve;
-  let improvedBlocks = context.localized.blocks;
-  let patched = 0;
-  if (improve) {
-    improve = {
-      ...improve,
-      applied: changes.improvementProposalIds,
-      overrides: changes.userTexts,
-    };
-    const r = applyImprovements(
-      context.localized,
-      context.source?.blocks ?? [],
-      improve,
-      sameLanguage,
-    );
-    improvedBlocks = r.blocks;
-    patched = r.patched;
-    improve = { ...improve, warnings: r.warnings };
-  }
-
-  const improvedLocalized: LocalizedDoc = { meta: context.localized.meta, blocks: improvedBlocks };
 
   // Schritt-5-Link (respektiert linking.inserted) + semantische Links.
   let semanticLinking: SemanticLinkingResult | undefined = context.semanticLinking;
@@ -749,7 +690,7 @@ export async function applyAllChangesStep(
   let inserted: { block_id: string; keyword: string; url: string }[] = [];
   if (semanticLinking) {
     const outcome = applySemanticLinks(
-      improvedLocalized,
+      context.localized,
       linking,
       semanticLinking,
       changes.semanticBlockIds,
@@ -758,10 +699,10 @@ export async function applyAllChangesStep(
     inserted = outcome.inserted;
     semanticLinking = { ...semanticLinking, inserted };
   } else {
-    finalBlocks = applyLinkingPatch(improvedLocalized, linking);
+    finalBlocks = applyLinkingPatch(context.localized, linking);
   }
 
-  let exportMarkdown = renderMarkdown(finalBlocks, improvedLocalized.meta, {
+  let exportMarkdown = renderMarkdown(finalBlocks, context.localized.meta, {
     closing_note: market.closing_note,
   });
 
@@ -786,7 +727,6 @@ export async function applyAllChangesStep(
     ...context,
     ...(linking ? { linking } : {}),
     ...(semanticLinking ? { semanticLinking } : {}),
-    ...(improve ? { improve } : {}),
     ...(sources ? { sources } : {}),
     exportMarkdown,
   };
@@ -819,140 +759,18 @@ export async function applyAllChangesStep(
       .update({ semantic_links_pending: 0, updated_at: new Date().toISOString() })
       .eq("id", jobId);
   }
-  if (improve) {
+  if (sources) {
     await supabaseAdmin
       .from("job_steps")
       .update({
-        output: improve as never,
+        output: sources as never,
         updated_at: new Date().toISOString(),
       })
       .eq("job_id", jobId)
-      .eq("step_key", "improve");
+      .eq("step_key", "sources");
   }
   await syncJobStatus(jobId, nextContext);
-  return {
-    ok: true,
-    inserted: inserted.length,
-    applied: changes.improvementProposalIds.length,
-    patched,
-  };
-}
-
-/**
- * Wendet die vom Nutzer bestätigten Verbesserungsvorschläge an und rendert den
- * Export neu. Reine Hinweise (ohne patch) werden nur als bestätigt markiert –
- * außer der Nutzer hat eine eigene Quelle/eigenen Text mitgegeben, die/der dann
- * an den Block angehängt wird. Bereits übernommene Links (Schritt 5 + 6) bleiben erhalten.
- */
-export async function applyImprovementsStep(
-  jobId: string,
-  selectedProposalIds: string[],
-  userTexts: Record<string, string> = {},
-): Promise<{ ok: boolean; applied: number; patched: number; error?: string }> {
-  const { data: job, error } = await supabaseAdmin
-    .from("jobs")
-    .select("*, markets(*)")
-    .eq("id", jobId)
-    .maybeSingle();
-  if (error || !job) throw new Error("Job nicht gefunden.");
-  const marketRow = (job as unknown as { markets: MarketRow }).markets;
-  const market = toMarketProfile(marketRow);
-  const context = ((job as { context?: JobContext }).context ?? {}) as JobContext;
-  if (!context.localized?.blocks?.length)
-    throw new Error("Schritt 3 (Lokalisieren) muss zuerst laufen.");
-  if (!context.improve)
-    throw new Error("Schritt 8 (Verbesserungen & Quellen) muss zuerst laufen.");
-
-  const selected = new Set(selectedProposalIds);
-  const sourceById = new Map((context.source?.blocks ?? []).map((b) => [b.id, b]));
-  const sameLanguage = isGermanTarget(market);
-  const blocks: LocalizedBlock[] = context.localized.blocks.map((b) => ({ ...b }));
-  const appliedIds: string[] = [];
-  const warnings: string[] = [];
-  let patched = 0;
-
-  for (const p of context.improve.proposals) {
-    if (!selected.has(p.id)) continue;
-    appliedIds.push(p.id);
-
-    const userText = (userTexts[p.id] ?? "").trim();
-
-    if (p.block_id && p.patch) {
-      const idx = blocks.findIndex((b) => b.id === p.block_id);
-      const src = sourceById.get(p.block_id);
-      if (idx < 0 || !src || blocks[idx]!.removed) continue;
-      const type = blocks[idx]!.type;
-      let patch = p.patch as BlockContent;
-      // Nutzer hat den Vorschlag bearbeitet (nur bei Text-Blöcken möglich).
-      if (userText && (type === "paragraph" || type === "quote" || type === "heading")) {
-        patch = { text: userText };
-      }
-      const v = validateBlockPatch(src, patch, { removable: false, sameLanguage });
-      if (v.ok) {
-        blocks[idx] = v.block;
-        patched += 1;
-      } else {
-        warnings.push(`${p.title}: ${v.errors.join("; ")}`);
-      }
-      continue;
-    }
-
-    if (p.block_id && userText) {
-      const idx = blocks.findIndex((b) => b.id === p.block_id);
-      const src = sourceById.get(p.block_id);
-      const target = idx < 0 ? undefined : blocks[idx];
-      if (!src || !target || target.removed) continue;
-      if (target.type === "paragraph" || target.type === "quote") {
-        const v = validateBlockPatch(
-          src,
-          { text: `${target.text} Quelle: ${userText}` },
-          { removable: false, sameLanguage },
-        );
-        if (v.ok) {
-          blocks[idx] = v.block;
-          patched += 1;
-        } else {
-          warnings.push(`${p.title}: ${v.errors.join("; ")}`);
-        }
-      } else {
-        warnings.push(
-          `${p.title}: Blocktyp „${target.type}“ unterstützt kein automatisches Anhängen einer Quelle.`,
-        );
-      }
-    }
-  }
-
-  const improvedLocalized = { meta: context.localized.meta, blocks };
-  const finalBlocks = context.semanticLinking
-    ? applySemanticLinks(
-        improvedLocalized,
-        context.linking,
-        context.semanticLinking,
-        context.semanticLinking.inserted.map((i) => i.block_id),
-      ).blocks
-    : applyLinkingPatch(improvedLocalized, context.linking);
-  const exportMarkdown = renderMarkdown(finalBlocks, improvedLocalized.meta, {
-    closing_note: market.closing_note,
-  });
-  const improve: ImprovementResult = { ...context.improve, applied: appliedIds, warnings };
-  const nextContext: JobContext = {
-    ...context,
-    localized: improvedLocalized,
-    improve,
-    exportMarkdown,
-  };
-
-  await supabaseAdmin
-    .from("jobs")
-    .update({ context: nextContext as never, updated_at: new Date().toISOString() })
-    .eq("id", jobId);
-  await supabaseAdmin
-    .from("job_steps")
-    .update({ output: improve as never, updated_at: new Date().toISOString() })
-    .eq("job_id", jobId)
-    .eq("step_key", "improve");
-  await syncJobStatus(jobId, nextContext);
-  return { ok: true, applied: appliedIds.length, patched };
+  return { ok: true, inserted: inserted.length };
 }
 
 /**
@@ -1074,18 +892,9 @@ function describeStepInput(
         export_length: ctx.exportMarkdown?.length ?? 0,
         market: marketInfo,
       };
-    case "improve":
-      return {
-        source_blocks: ctx.source?.blocks.length ?? 0,
-        findings: ctx.findings?.length ?? 0,
-        removed_blocks: (ctx.localized?.blocks ?? []).filter((b) => b.removed).length,
-        export_length: ctx.exportMarkdown?.length ?? 0,
-        market: marketInfo,
-      };
     case "sources":
       return {
-        source_proposals: (ctx.improve?.proposals ?? []).filter((p) => p.kind === "quelle").length,
-        filled_overrides: Object.keys(ctx.improve?.overrides ?? {}).length,
+        export_length: ctx.exportMarkdown?.length ?? 0,
         market: marketInfo,
       };
     default:

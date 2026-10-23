@@ -13,7 +13,6 @@ export type StepKey =
   | "links"
   | "semantic_links"
   | "check"
-  | "improve"
   | "sources";
 
 export interface StepDef {
@@ -82,19 +81,11 @@ export const PIPELINE: StepDef[] = [
       "Prüft den Zieltext gegen das Original und erstellt ein Briefing (keine Änderungen).",
   },
   {
-    key: "improve",
-    order: 8,
-    label: "8 · Verbesserungen & Quellen",
-    promptKey: "improvement_proposals",
-    description:
-      "Schlägt inhaltliche Verbesserungen und fehlende Zielmarkt-Quellen vor – Anwendung erst nach Bestätigung.",
-  },
-  {
     key: "sources",
-    order: 9,
-    label: "9 · Quellenrecherche",
+    order: 8,
+    label: "8 · EEAT-Quellen",
     description:
-      "Sucht per OpenAI-Websuche automatisch nach passenden Quellen (je „Quelle“-Vorschlag und E-E-A-T) und füllt die Felder vor.",
+      "Sucht per OpenAI-Websuche automatisch nach anerkannten E-E-A-T-Quellen für den Zielmarkt.",
   },
 ];
 
@@ -280,39 +271,6 @@ export interface CheckResult {
   sourceFetched: boolean;
 }
 
-/** Art eines Verbesserungsvorschlags (Schritt 8). */
-export type ImprovementKind = "verbesserung" | "quelle";
-
-/** Ein Verbesserungsvorschlag – wird erst nach Bestätigung angewendet. */
-export interface ImprovementProposal {
-  id: string;
-  kind: ImprovementKind;
-  /** Zielblock (null = dokumentweit/Meta). */
-  block_id: string | null;
-  title: string;
-  problem: string;
-  suggestion: string;
-  /** Vollständig korrigierter Blockinhalt (text/items/rows) – oder null, wenn nur ein Hinweis. */
-  patch: Record<string, unknown> | null;
-  /** Vorgeschlagene Quelle (derzeit ohne externe API immer null; reserviert). */
-  source: { url: string; title: string | null } | null;
-}
-
-/** Ergebnis von Schritt 8 (Verbesserungen & Quellen). */
-export interface ImprovementResult {
-  proposals: ImprovementProposal[];
-  /** Vom Nutzer bestätigte Vorschlags-IDs. */
-  applied: string[];
-  /**
-   * Vom Nutzer eingegebener/geänderter Text je Vorschlags-ID:
-   * - "verbesserung" → bearbeiteter korrigierter Volltext
-   * - "quelle" → einzufügende Quelle (URL/Text)
-   */
-  overrides: Record<string, string>;
-  notes: string[];
-  warnings: string[];
-}
-
 /** Eine gefundene Quelle (Name + URL + Begründung). */
 export interface SourceSuggestion {
   name: string;
@@ -321,7 +279,7 @@ export interface SourceSuggestion {
   reason: string;
 }
 
-/** Ergebnis von Schritt 9 (Quellenrecherche). */
+/** Ergebnis von Schritt 8 (EEAT-Quellen). */
 export interface SourcesResult {
   /** Gefundene E-E-A-T-Quellen für den ganzen Artikel. */
   eeat: SourceSuggestion[];
@@ -340,7 +298,6 @@ export interface JobContext {
   linking?: LinkingResult;
   semanticLinking?: SemanticLinkingResult;
   check?: CheckResult;
-  improve?: ImprovementResult;
   sources?: SourcesResult;
 }
 
@@ -357,7 +314,6 @@ export const STEP_CONTEXT_KEYS: Record<StepKey, (keyof JobContext)[]> = {
   links: ["linking"],
   semantic_links: ["semanticLinking"],
   check: ["check"],
-  improve: ["improve"],
   sources: ["sources"],
 };
 

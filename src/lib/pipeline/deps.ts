@@ -50,26 +50,13 @@ export function dependencyBlocker(stepKey: string, ctx: JobContext): string | nu
       return ctx.review && typeof ctx.exportMarkdown === "string"
         ? null
         : "Schritt 4 (Prüfen & Export) muss zuerst erfolgreich laufen.";
-    case "improve":
-      if (!hasSource) return "Schritt 1 (Quelle extrahieren) muss zuerst erfolgreich laufen.";
-      if (!Array.isArray(ctx.findings))
-        return "Schritt 2 (DE-Bezüge finden) muss zuerst erfolgreich laufen.";
-      if (!ctx.localized?.blocks?.length)
-        return "Schritt 3 (Lokalisieren) muss zuerst erfolgreich laufen.";
-      if (!(ctx.review && typeof ctx.exportMarkdown === "string"))
-        return "Schritt 4 (Prüfen & Export) muss zuerst erfolgreich laufen.";
-      return ctx.check
-        ? null
-        : "Schritt 7 (Lokalisierungs-Check) muss zuerst erfolgreich laufen.";
     case "sources":
       if (!hasSource) return "Schritt 1 (Quelle extrahieren) muss zuerst erfolgreich laufen.";
       if (!ctx.localized?.blocks?.length)
         return "Schritt 3 (Lokalisieren) muss zuerst erfolgreich laufen.";
       if (!(ctx.review && typeof ctx.exportMarkdown === "string"))
         return "Schritt 4 (Prüfen & Export) muss zuerst erfolgreich laufen.";
-      return ctx.improve
-        ? null
-        : "Schritt 8 (Verbesserungen & Quellen) muss zuerst erfolgreich laufen.";
+      return null;
     default:
       return null;
   }
